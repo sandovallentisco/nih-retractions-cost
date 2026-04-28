@@ -1,0 +1,19 @@
+# Security (NEVER upload your credentials)
+.env
+
+# Datasets (Keep your raw and processed CSVs local)
+data/
+*.csv
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+
+# Python Cache (Hidden files Python creates automatically)
+__pycache__/
+*.pyc
+*.pyo
+
+# OS generated files (like Mac's folder preference file)
+.DS_Store
