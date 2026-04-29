@@ -40,9 +40,13 @@ jobs:
           pip install -r requirements.txt
 
       - name: Download raw data (Retraction Watch + NIH ExPORTER)
+        # ``--full`` re-downloads every fiscal year from 1985 onwards. This is
+        # required because data/raw/ is gitignored, so the runner does not
+        # inherit any historical NIH ExPORTER files between runs. Steps 2 and
+        # 3 of the pipeline read every annual CSV in data/raw/nih_reporter/.
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-        run: python -m src.downloader
+        run: python -m src.downloader --full
 
       - name: Run pipeline
         env:
