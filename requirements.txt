@@ -2,3 +2,4 @@ pandas>=2.0.0
 biopython>=1.81
 tqdm>=4.66.0
 python-dotenv>=1.0.0
+requests>=2.31.0

@@ -1,95 +1,95 @@
 # =============================================================================
-# METADATA EXTRACTION FUNCTION
+# ENTREZ CLIENT - PUBMED METADATA EXTRACTION
 # =============================================================================
-import pandas as pd # Pandas is used for data manipulation and tabular analysis.
-from Bio import Entrez # Bio.Entrez provides a programmatic interface to query the NCBI E-utilities API.
+# Single function wrapper around ``Bio.Entrez`` that resolves a Retraction
+# Watch row (DOI plus optional fallback PMID) into the publication's
+# study designs and grant list, ready to be merged back into the main
+# dataframe by :mod:`src.pipeline`.
+#
+# The implementation favours robustness over thoroughness: any individual
+# network failure or XML edge case returns a sentinel rather than raising,
+# so a single bad row cannot abort the long-running pipeline.
+# =============================================================================
+import pandas as pd
+from Bio import Entrez
+
 
 def get_pubmed_metadata(doi, provided_pmid):
-    """
-    Queries the PubMed database to retrieve metadata for a specific publication.
+    """Resolve a paper to ``(pmid, study_design_str, funding_list)``.
 
-    Parameters:
-    - doi (str/float): The Digital Object Identifier of the target publication.
-    - provided_pmid (str/float): The fallback PubMed ID provided by the dataset.
+    Resolution strategy:
+        1. If a non-null DOI is provided, query Entrez with ``<doi>[DOI]``.
+        2. If that fails or the DOI is empty, fall back to ``provided_pmid``
+           after stripping any trailing ``.0`` introduced by pandas.
+        3. If neither yields a usable PMID, return the sentinel triple
+           ``("No valid DOI or PMID", "Unknown", [])``.
 
-    Returns:
-    - tuple: (Resolved PMID, String of concatenated Study Designs, List of Funding Dictionaries)
+    Errors raised by Entrez or by XML parsing are caught and returned as
+    ``("Error", "Error: <details>", [])`` so the pipeline can persist
+    partial state and move on.
     """
 
     pmid_to_fetch = None
 
-    # ---------------------------------------------------------
-    # STEP 1A: Primary Query via DOI
-    # ---------------------------------------------------------
-    # Validate that the DOI is not a null value (NaN) and is a populated string.
+    # ------------------------------------------------------------------
+    # Step 1A - primary resolution by DOI.
+    # ------------------------------------------------------------------
     if pd.notna(doi) and str(doi).strip() != "":
         try:
-            # Append the [DOI] search tag to restrict the query strictly to the DOI field.
             search_term = f"{doi}[DOI]"
-
-            # Execute the search query. 'retmax=1' restricts the payload to the top result.
             handle = Entrez.esearch(db="pubmed", term=search_term, retmax=1)
             search_results = Entrez.read(handle)
             handle.close()
 
-            # If the search yields a valid ID, assign it for the subsequent fetch request.
             if search_results['IdList']:
                 pmid_to_fetch = search_results['IdList'][0]
 
-        # Suppress exceptions during the search phase to allow the fallback mechanism to engage.
         except Exception:
+            # Suppressed on purpose: the fallback path will pick it up.
             pass
 
-    # ---------------------------------------------------------
-    # STEP 1B: Fallback Query via Provided PMID
-    # ---------------------------------------------------------
-    # If the DOI query failed to return an ID, evaluate the provided baseline PMID.
+    # ------------------------------------------------------------------
+    # Step 1B - fallback to the PMID supplied by Retraction Watch.
+    # ------------------------------------------------------------------
     if not pmid_to_fetch and pd.notna(provided_pmid):
-
-        # Sanitize the input: convert float representations (e.g., "123.0") to standard strings.
+        # Pandas often loads numeric PMIDs as floats ("12345.0"); strip
+        # the suffix so Entrez accepts the value.
         clean_pmid = str(provided_pmid).split('.')[0].strip()
 
-        # Validate that the sanitized string is a usable ID.
-        if clean_pmid != "" and clean_pmid != "0":
+        if clean_pmid not in {"", "0"}:
             pmid_to_fetch = clean_pmid
 
-    # If both primary and secondary resolution strategies fail, return null data markers.
     if not pmid_to_fetch:
         return "No valid DOI or PMID", "Unknown", []
 
-    # ---------------------------------------------------------
-    # STEP 2: Record Retrieval & XML Parsing (EFetch)
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Step 2 - fetch and parse the full PubMed XML record.
+    # ------------------------------------------------------------------
     try:
-        # Retrieve the comprehensive publication record in XML format.
         handle = Entrez.efetch(db="pubmed", id=pmid_to_fetch, retmode="xml")
         fetch_records = Entrez.read(handle)
         handle.close()
 
-        # Traverse the nested dictionary structure generated by Bio.Entrez.
         article = fetch_records['PubmedArticle'][0]['MedlineCitation']['Article']
 
-        # --- Isolate Study Design Attributes ---
+        # PublicationTypeList encodes study design tags such as
+        # "Journal Article", "Randomized Controlled Trial", "Review", etc.
         study_designs = []
-        # Conditional check to ensure the 'PublicationTypeList' key exists in the current record.
         if 'PublicationTypeList' in article:
-            # Cast Biopython string objects to standard Python strings via list comprehension.
             study_designs = [str(pt) for pt in article['PublicationTypeList']]
 
-        # --- Isolate Funding Support Attributes ---
+        # GrantList contains the funding source records associated with the
+        # paper. We extract just the agency and grant ID; any missing fields
+        # fall back to neutral placeholders.
         funding_data = []
-        # Conditional check to ensure the 'GrantList' key exists.
         if 'GrantList' in article:
             for grant in article['GrantList']:
-                # Utilize dictionary .get() method to safely assign default values if a key is absent.
                 funding_data.append({
                     'Agency': grant.get('Agency', 'Unknown Agency'),
-                    'GrantID': grant.get('GrantID', 'No ID')
+                    'GrantID': grant.get('GrantID', 'No ID'),
                 })
 
-        # Return the resolved PMID, a semicolon-delimited string of study designs, and the funding list.
         return pmid_to_fetch, "; ".join(study_designs), funding_data
 
-    # Log specific exception details if the XML parsing or network request fails.
-    except Exception as e:
-        return "Error", f"Error: {str(e)}", []
+    except Exception as exc:
+        return "Error", f"Error: {str(exc)}", []
