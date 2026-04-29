@@ -163,6 +163,13 @@ def download_nih_year(year: int, force: bool = False) -> Optional[Path]:
     By default the function is idempotent: if the destination CSV already
     exists, the download is skipped. Set ``force=True`` to re-download
     (typically for the current FY, which NIH refreshes quarterly).
+
+    Returns ``None`` (and logs a warning) when the upstream response is not
+    a valid ZIP. NIH ExPORTER is known to reply with HTTP 200 plus an HTML
+    error page for fiscal years that have not yet been published, which
+    would otherwise crash :func:`_extract_zip_to_nih_dir`. Treating it as a
+    soft skip lets the rest of the download (and the rest of the cron
+    pipeline) proceed with the years that *are* available.
     """
     out_csv = _prj_csv_path(year)
     if out_csv.exists() and not force:
@@ -174,7 +181,21 @@ def download_nih_year(year: int, force: bool = False) -> Optional[Path]:
     if payload is None:
         return None
 
-    extracted = _extract_zip_to_nih_dir(payload)
+    # ZIP files always start with the four-byte magic "PK\x03\x04". A quick
+    # prefix check lets us reject HTML error pages without paying the cost
+    # of a failed ``zipfile.ZipFile`` parse.
+    if not payload.startswith(b"PK\x03\x04"):
+        print(
+            f"[downloader] FY{year}: response is not a ZIP "
+            f"(probably not yet published). Skipping."
+        )
+        return None
+
+    try:
+        extracted = _extract_zip_to_nih_dir(payload)
+    except zipfile.BadZipFile as exc:
+        print(f"[downloader] FY{year}: corrupt ZIP ({exc}). Skipping.")
+        return None
     return extracted[0] if extracted else None
 
 
@@ -237,7 +258,21 @@ def download_funding_history(force: bool = False) -> List[Path]:
     payload = _http_get(NIH_EXPORTER_FUNDING_URL)
     if payload is None:
         return []
-    return _extract_zip_to_nih_dir(payload)
+
+    # Same defensive check as in :func:`download_nih_year`: NIH may answer
+    # with a non-ZIP HTML body if the upstream URL ever changes.
+    if not payload.startswith(b"PK\x03\x04"):
+        print(
+            "[downloader] Funding history: response is not a ZIP. "
+            "Skipping (verify NIH_EXPORTER_FUNDING_URL)."
+        )
+        return []
+
+    try:
+        return _extract_zip_to_nih_dir(payload)
+    except zipfile.BadZipFile as exc:
+        print(f"[downloader] Funding history: corrupt ZIP ({exc}). Skipping.")
+        return []
 
 
 # ---------------------------------------------------------------------------
