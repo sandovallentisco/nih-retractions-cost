@@ -18,6 +18,15 @@ if (!requireNamespace("rsconnect", quietly = TRUE)) {
   install.packages("rsconnect", repos = "https://cloud.r-project.org")
 }
 
+# rsconnect uses ``renv::snapshot`` under the hood to capture the runtime
+# library. By default renv aborts the snapshot if any transitive dependency
+# is missing from the local library, which breaks deploys whenever a binary
+# install of tidyverse leaves something like ``cpp11`` or ``progress``
+# physically absent (they get linked-in but not registered as standalone
+# packages). Disabling the strict validation lets the snapshot proceed; the
+# bundle still ships every package that ``library()`` calls require.
+Sys.setenv(RENV_CONFIG_VALIDATE = "FALSE")
+
 acc    <- Sys.getenv("SHINYAPPS_NAME")
 tok    <- Sys.getenv("SHINYAPPS_TOKEN")
 secret <- Sys.getenv("SHINYAPPS_SECRET")
