@@ -26,6 +26,8 @@ import datetime as dt
 import io
 import os
 import sys
+import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import List, Optional
@@ -61,6 +63,25 @@ NIH_EXPORTER_FUNDING_URL = os.environ.get(
 
 # Optional Personal Access Token for private GitLab repositories.
 GITLAB_TOKEN = os.environ.get("GITLAB_TOKEN", "").strip()
+
+# URL of the pre-bundled NIH ExPORTER tarball stored as a GitHub Release asset.
+# This is the recommended download path because NIH no longer exposes stable
+# bulk-download URLs on reporter.nih.gov/exporter (they generate opaque
+# single-use links via JavaScript). The CI workflow injects the correct value
+# automatically using ``${{ github.repository }}``; the placeholder below is
+# only useful when running locally or when manually overriding the source.
+NIH_RAW_RELEASE_URL = os.environ.get(
+    "NIH_RAW_RELEASE_URL",
+    "",
+)
+
+# Personal access token for downloading release assets from PRIVATE GitHub
+# repositories. GitHub Actions provides this automatically via the built-in
+# ``${{ secrets.GITHUB_TOKEN }}``; for local runs you may need to set
+# ``GH_TOKEN`` yourself if your repo is private.
+GH_TOKEN = (os.environ.get("GH_TOKEN")
+            or os.environ.get("GITHUB_TOKEN")
+            or "").strip()
 
 # Earliest fiscal year published by NIH ExPORTER.
 FIRST_FISCAL_YEAR = 1985
@@ -276,9 +297,102 @@ def download_funding_history(force: bool = False) -> List[Path]:
 
 
 # ---------------------------------------------------------------------------
+# NIH ExPORTER - tarball pulled from a GitHub Release asset
+# ---------------------------------------------------------------------------
+# Since 2024-2025 NIH has progressively removed the static bulk-download URLs
+# from reporter.nih.gov/exporter (the table is now JavaScript-driven and the
+# per-row download buttons emit single-use, opaque URLs that cannot be
+# replayed from a cron). The most reliable workaround is to maintain a
+# pre-bundled tarball as a GitHub Release asset on this repository: the user
+# refreshes it manually once a year (when NIH publishes a new full fiscal
+# year), and the cron downloads it on every run from a stable URL.
+def download_nih_raw_from_release(
+        url: str = "",
+        token: str = "") -> List[Path]:
+    """Download the NIH raw-data tarball from a GitHub Release and extract it.
+
+    The tarball is expected to be a ``.tar.gz`` containing
+    ``RePORTER_PRJ_C_FY{year}.csv`` and ``RePORTER_PRJFUNDING_C_FY{year}.csv``
+    files (any directory layout inside the archive is accepted - we extract
+    by basename). Files are written to ``data/raw/nih_reporter/``.
+
+    Parameters
+    ----------
+    url:
+        Direct download URL of the tarball. If empty, falls back to
+        :data:`NIH_RAW_RELEASE_URL`.
+    token:
+        GitHub access token used as bearer auth. Required only for private
+        repositories; falls back to :data:`GH_TOKEN`.
+    """
+    url = url or NIH_RAW_RELEASE_URL
+    if not url:
+        print(
+            "[downloader] NIH_RAW_RELEASE_URL is not set. Skipping NIH "
+            "download. Either set the env variable to a Release asset URL "
+            "or upload data/raw/nih_reporter/ files manually."
+        )
+        return []
+
+    token = token or GH_TOKEN
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        # The Release-asset endpoint requires this Accept header to return
+        # the binary payload rather than the JSON metadata.
+        headers["Accept"] = "application/octet-stream"
+
+    print(f"[downloader] GET {url}")
+    response = requests.get(url, headers=headers, timeout=600, stream=True)
+    response.raise_for_status()
+
+    NIH_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Stream the archive to a temporary file. NIH raw data tarballs are
+    # typically 100-300 MB and would needlessly stress memory if buffered.
+    bytes_written = 0
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                tmp.write(chunk)
+                bytes_written += len(chunk)
+        tmp_path = Path(tmp.name)
+
+    print(
+        f"[downloader] Downloaded {bytes_written / (1024 * 1024):.2f} MB tarball; "
+        "extracting CSVs..."
+    )
+
+    out: List[Path] = []
+    try:
+        with tarfile.open(tmp_path, "r:gz") as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                name_lower = member.name.lower()
+                if not name_lower.endswith(".csv"):
+                    continue
+                # Flatten any nested directory layout: write by basename.
+                target = NIH_DIR / Path(member.name).name
+                src = tf.extractfile(member)
+                if src is None:
+                    continue
+                with open(target, "wb") as dst:
+                    dst.write(src.read())
+                out.append(target)
+        print(f"[downloader] Extracted {len(out)} CSVs into {NIH_DIR}")
+    except tarfile.TarError as exc:
+        print(f"[downloader] ERROR: could not read tarball ({exc}).")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Orchestration + CLI
 # ---------------------------------------------------------------------------
-def run(mode: str = "incremental",
+def run(mode: str = "release",
         rw: bool = True,
         nih: bool = True,
         n_back: int = 2) -> int:
@@ -287,14 +401,22 @@ def run(mode: str = "incremental",
     Parameters
     ----------
     mode:
-        ``"incremental"`` -> current FY plus ``n_back`` previous years
-        (used by the quarterly cron). ``"full"`` -> every year from
-        1985 onwards plus the historical funding archive (initial setup).
+        ``"release"`` (default) -> NIH data is fetched as a single tarball
+        from a GitHub Release asset on this repository. This is the only
+        reliable mode in CI because NIH no longer publishes stable bulk
+        download URLs.
+
+        ``"legacy-full"`` and ``"legacy-incremental"`` -> kept for
+        archaeological purposes; they hit ``reporter.nih.gov/exporter/...``
+        directly. Both currently return HTML 200 for every fiscal year and
+        will produce no data; use them only if NIH ever restores the old
+        endpoints.
     rw, nih:
         Toggle Retraction Watch and NIH downloads independently. Used by
         the ``--rw-only`` and ``--nih-only`` CLI flags.
     n_back:
-        Number of previous fiscal years to refresh in incremental mode.
+        Number of previous fiscal years to refresh in legacy-incremental
+        mode.
     """
     print("=" * 70)
     print(f"AUTOMATED DOWNLOADER ({mode})".center(70))
@@ -303,13 +425,16 @@ def run(mode: str = "incremental",
         if rw:
             download_retraction_watch()
         if nih:
-            if mode == "full":
+            if mode == "release":
+                download_nih_raw_from_release()
+            elif mode == "legacy-full":
                 download_all_nih_years(force_current=True)
                 download_funding_history(force=False)
-            else:  # incremental
+            elif mode == "legacy-incremental":
                 download_recent_nih_years(n_back=n_back, force_current=True)
-                # In case a previous setup did not complete the historical archive.
                 download_funding_history(force=False)
+            else:
+                raise ValueError(f"Unknown download mode: {mode}")
     except Exception as exc:
         print(f"[downloader] ERROR: {exc}")
         return 1
@@ -319,31 +444,55 @@ def run(mode: str = "incremental",
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download Retraction Watch (GitLab) and NIH ExPORTER raw files.",
+        description=(
+            "Download Retraction Watch (GitLab) and the NIH ExPORTER raw "
+            "data tarball from a GitHub Release asset."
+        ),
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
-        "--full",
+        "--release",
         action="store_true",
-        help="Initial setup: download every fiscal year from 1985 plus historical funding archive.",
+        help=(
+            "(Default) Download NIH data as a tarball from "
+            "$NIH_RAW_RELEASE_URL. Recommended for CI."
+        ),
     )
     mode_group.add_argument(
-        "--incremental",
+        "--legacy-full",
         action="store_true",
-        help="(Default) current FY plus N previous years. Designed for the quarterly cron.",
+        help=(
+            "DEPRECATED: hit reporter.nih.gov/exporter directly for every "
+            "fiscal year. Currently broken upstream."
+        ),
+    )
+    mode_group.add_argument(
+        "--legacy-incremental",
+        action="store_true",
+        help=(
+            "DEPRECATED: hit reporter.nih.gov/exporter directly for the "
+            "current FY plus N previous years. Currently broken upstream."
+        ),
     )
     parser.add_argument("--rw-only", action="store_true",
                         help="Download Retraction Watch only.")
     parser.add_argument("--nih-only", action="store_true",
                         help="Download NIH ExPORTER only.")
-    parser.add_argument("--n-back", type=int, default=2,
-                        help="Number of previous fiscal years to refresh in incremental mode.")
+    parser.add_argument(
+        "--n-back", type=int, default=2,
+        help="Number of previous fiscal years to refresh in legacy-incremental mode.",
+    )
     return parser
 
 
 def main() -> int:
     args = _build_parser().parse_args()
-    mode = "full" if args.full else "incremental"
+    if args.legacy_full:
+        mode = "legacy-full"
+    elif args.legacy_incremental:
+        mode = "legacy-incremental"
+    else:
+        mode = "release"
     rw = not args.nih_only
     nih = not args.rw_only
     return run(mode=mode, rw=rw, nih=nih, n_back=args.n_back)

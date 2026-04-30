@@ -40,13 +40,16 @@ jobs:
           pip install -r requirements.txt
 
       - name: Download raw data (Retraction Watch + NIH ExPORTER)
-        # ``--full`` re-downloads every fiscal year from 1985 onwards. This is
-        # required because data/raw/ is gitignored, so the runner does not
-        # inherit any historical NIH ExPORTER files between runs. Steps 2 and
-        # 3 of the pipeline read every annual CSV in data/raw/nih_reporter/.
+        # NIH no longer publishes stable bulk download URLs, so the NIH raw
+        # data is fetched as a tarball published as a Release asset on this
+        # repository. NIH_RAW_RELEASE_URL points at the "latest" release of
+        # the current repo, so updates require nothing more than uploading
+        # a new release with the same asset name (nih_raw.tar.gz).
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-        run: python -m src.downloader --full
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NIH_RAW_RELEASE_URL: https://github.com/${{ github.repository }}/releases/latest/download/nih_raw.tar.gz
+        run: python -m src.downloader
 
       - name: Run pipeline
         env:

@@ -98,3 +98,61 @@ commitear los CSVs procesados resetea ese contador).
 - **Invalidar la cache de PubMed**: borra
   `data/processed/pubmed_cache.csv` y haz push. La siguiente corrida la
   reconstruye desde cero.
+
+---
+
+## Maintaining the NIH raw-data Release asset
+
+Since 2025 NIH no longer exposes stable bulk-download URLs on
+``reporter.nih.gov/exporter`` (the page generates one-time-use opaque links
+via JavaScript, which a cron cannot replay). To work around that, the
+project keeps the NIH ExPORTER CSVs as a tarball published as a **GitHub
+Release asset**. The cron downloads that tarball on every run.
+
+### One-time setup
+
+1. Open a terminal in the project folder and create a tarball with all the
+   NIH CSVs you have locally:
+
+   ```powershell
+   # Windows / PowerShell
+   tar -czf nih_raw.tar.gz -C "data/raw/nih_reporter" .
+   ```
+
+   On macOS or Linux the same command works. The result is a single file,
+   typically 100-300 MB compressed.
+
+2. Go to your repo on GitHub: **Releases -> Draft a new release**.
+3. **Tag**: ``data-YYYY-MM-DD`` (e.g. ``data-2026-04-29``).
+   **Title**: ``NIH raw data snapshot YYYY-MM-DD``.
+4. Drag ``nih_raw.tar.gz`` into the asset upload area at the bottom of the
+   release form. **Asset filename must be exactly ``nih_raw.tar.gz``** -
+   the workflow downloads it by that exact name.
+5. Click **Publish release**.
+
+The workflow URL is fixed at
+``https://github.com/<owner>/<repo>/releases/latest/download/nih_raw.tar.gz``,
+which always resolves to the most recent release.
+
+### Quarterly refresh (manual, ~5 minutes)
+
+Once a year, when NIH publishes a new full fiscal year (typically around
+September), refresh the snapshot:
+
+1. Open ``https://reporter.nih.gov/exporter`` in a browser.
+2. Download the new ``RePORTER_PRJ_C_FYYYYY.zip`` via the cloud-icon button.
+3. Extract its contents into your local ``data/raw/nih_reporter/`` folder.
+4. Recreate the tarball with the same command above.
+5. Draft a new release on GitHub, attach the new ``nih_raw.tar.gz``, publish.
+
+Between releases the cron uses the data from the most recent snapshot, so
+a delayed refresh only delays the appearance of newly-funded grants in the
+dashboard. Existing analyses stay valid.
+
+### Private repositories
+
+If your repo is private, the workflow uses the built-in ``GITHUB_TOKEN``
+secret (already configured) to authenticate against the release asset.
+For local manual runs against a private repo, set ``GH_TOKEN`` in your
+shell to a personal access token with ``repo`` scope before invoking the
+downloader.
