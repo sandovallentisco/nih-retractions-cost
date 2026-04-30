@@ -21,7 +21,23 @@ if (!requireNamespace("rsconnect", quietly = TRUE)) {
 acc    <- Sys.getenv("SHINYAPPS_NAME")
 tok    <- Sys.getenv("SHINYAPPS_TOKEN")
 secret <- Sys.getenv("SHINYAPPS_SECRET")
-appnm  <- Sys.getenv("SHINYAPPS_APPNAME", unset = "nih-retractions")
+appnm  <- Sys.getenv("SHINYAPPS_APPNAME")
+
+# Sys.getenv's `unset` default only kicks in when the variable is *unset*.
+# In CI the workflow always passes SHINYAPPS_APPNAME (potentially as an empty
+# string when the secret has not been configured), so we apply the fallback
+# explicitly here.
+if (nchar(appnm) == 0) {
+  appnm <- "nih-retractions"
+}
+
+# Sanity-check the app name: shinyapps.io requires >=4 characters, only
+# letters, numbers, dashes and hyphens. Replace any invalid character with
+# a dash and pad with a suffix if necessary.
+appnm <- gsub("[^A-Za-z0-9-]", "-", appnm)
+if (nchar(appnm) < 4) {
+  appnm <- paste0(appnm, "-app")
+}
 
 if (acc == "" || tok == "" || secret == "") {
   stop("Missing credentials: set SHINYAPPS_NAME, SHINYAPPS_TOKEN and SHINYAPPS_SECRET.")
