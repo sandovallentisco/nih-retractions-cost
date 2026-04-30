@@ -87,18 +87,19 @@ jobs:
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: "4.3"
+          # Use Posit Public Package Manager so packages install from
+          # pre-compiled Linux binaries, avoiding the need for a C toolchain
+          # and system development headers (libcurl-dev, libssl-dev, ...).
+          use-public-rspm: true
 
-      - name: Cache R packages
+      - name: Install rsconnect (with system dependencies)
         if: ${{ github.event.inputs.deploy_shiny != 'false' }}
-        uses: actions/cache@v4
+        # ``setup-r-dependencies`` resolves system-level apt dependencies
+        # automatically and caches the R library between runs.
+        uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          path: ${{ env.R_LIBS_USER }}
-          key: r-${{ runner.os }}-rsconnect-v1
-
-      - name: Install rsconnect
-        if: ${{ github.event.inputs.deploy_shiny != 'false' }}
-        run: |
-          Rscript -e 'if (!requireNamespace("rsconnect", quietly = TRUE)) install.packages("rsconnect", repos = "https://cloud.r-project.org")'
+          packages: any::rsconnect
+          cache-version: 1
 
       - name: Deploy Shiny app
         if: ${{ github.event.inputs.deploy_shiny != 'false' }}
