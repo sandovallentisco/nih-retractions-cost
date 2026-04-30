@@ -27,6 +27,14 @@ if (!requireNamespace("rsconnect", quietly = TRUE)) {
 # bundle still ships every package that ``library()`` calls require.
 Sys.setenv(RENV_CONFIG_VALIDATE = "FALSE")
 
+# Force rsconnect to bake CRAN URLs into the deployment manifest instead of
+# the relative ``RSPM/...`` URLs that ``use-public-rspm`` would otherwise
+# emit. shinyapps.io's build server cannot resolve the ``RSPM/`` scheme and
+# fails with ``Unsupported url scheme`` on packages it has to rebuild from
+# source (e.g. isoband). The local install in the CI runner has already
+# happened against PPM, so this only affects what URL goes into the bundle.
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
 acc    <- Sys.getenv("SHINYAPPS_NAME")
 tok    <- Sys.getenv("SHINYAPPS_TOKEN")
 secret <- Sys.getenv("SHINYAPPS_SECRET")
