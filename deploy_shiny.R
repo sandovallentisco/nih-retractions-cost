@@ -28,19 +28,32 @@ Sys.setenv(RENV_CONFIG_VALIDATE = "FALSE")
 # shinyapps.io's build server cannot resolve.
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 
-# Re-install packages whose RSPM Repository field has caused shinyapps.io
-# build failures. Reinstalling from CRAN updates each package's DESCRIPTION
-# to Repository="CRAN", so the manifest URLs become resolvable absolute
-# CRAN paths. Extend this list if new packages surface in build logs.
-pkgs_to_reinstall_from_cran <- c("isoband")
-for (p in pkgs_to_reinstall_from_cran) {
-  if (p %in% rownames(installed.packages())) {
-    cat("[deploy] Reinstalling", p, "from CRAN to fix PPM URL scheme...\n")
-    suppressWarnings(remove.packages(p))
+# rsconnect determines the source URL for each package by reading the
+# Repository field of its DESCRIPTION file. Posit Public Package Manager
+# stamps that field with the literal "RSPM"; shinyapps.io's build server
+# cannot resolve URLs of the form "RSPM/src/contrib/<pkg>.tar.gz" and aborts
+# image creation. Re-stamping every installed package's DESCRIPTION to
+# Repository="CRAN" makes the resulting manifest point at fully qualified
+# CRAN URLs, which shinyapps.io resolves correctly. The Repository field is
+# pure metadata, so this rewrite is harmless to the runtime behaviour.
+restamp_repository_field <- function() {
+  patched <- 0
+  for (lib in .libPaths()) {
+    if (!dir.exists(lib)) next
+    for (pkg_dir in list.dirs(lib, recursive = FALSE)) {
+      desc_file <- file.path(pkg_dir, "DESCRIPTION")
+      if (!file.exists(desc_file)) next
+      lines <- readLines(desc_file, warn = FALSE)
+      idx <- grep("^Repository:\\s*RSPM\\s*$", lines)
+      if (length(idx) == 0) next
+      lines[idx] <- "Repository: CRAN"
+      writeLines(lines, desc_file)
+      patched <- patched + 1
+    }
   }
-  install.packages(p, repos = "https://cloud.r-project.org",
-                   quiet = TRUE, dependencies = FALSE)
+  cat("[deploy] Re-stamped Repository field on", patched, "packages.\n")
 }
+restamp_repository_field()
 
 acc    <- Sys.getenv("SHINYAPPS_NAME")
 tok    <- Sys.getenv("SHINYAPPS_TOKEN")
