@@ -92,14 +92,29 @@ jobs:
           # and system development headers (libcurl-dev, libssl-dev, ...).
           use-public-rspm: true
 
-      - name: Install rsconnect (with system dependencies)
+      - name: Install rsconnect and Shiny app dependencies
         if: ${{ github.event.inputs.deploy_shiny != 'false' }}
         # ``setup-r-dependencies`` resolves system-level apt dependencies
-        # automatically and caches the R library between runs.
+        # automatically and caches the R library between runs. We install
+        # every package that ``app.R`` consumes, because rsconnect uses
+        # renv::dependencies() during deploy to snapshot the runtime libs:
+        # if a package is not present in the local library it is silently
+        # omitted from the bundle, and the resulting Shiny app crashes on
+        # startup with ``The shiny package was not found in the library``.
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          packages: any::rsconnect
-          cache-version: 1
+          packages: |
+            any::rsconnect
+            any::shiny
+            any::tidyverse
+            any::scales
+            any::lubridate
+            any::DT
+            any::plotly
+            any::shinycssloaders
+            any::quantmod
+            any::zoo
+          cache-version: 2
 
       - name: Deploy Shiny app
         if: ${{ github.event.inputs.deploy_shiny != 'false' }}

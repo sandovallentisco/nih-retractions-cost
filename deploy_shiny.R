@@ -61,14 +61,49 @@ if (length(missing) > 0) {
 }
 
 cat("Deploying", length(files), "files to shinyapps.io as app:", appnm, "\n")
-rsconnect::deployApp(
-  appDir         = ".",
-  appFiles       = files,
-  appPrimaryDoc  = "app.R",
-  appName        = appnm,
-  account        = acc,
-  forceUpdate    = TRUE,
-  launch.browser = FALSE
-)
 
-cat("Deploy complete.\n")
+# shinyapps.io's API gateway occasionally returns transient 502 / 503 errors
+# while rsconnect polls the deployment task, even after the actual deploy
+# has succeeded. Wrap the call in a small retry loop so a network blip does
+# not turn a real success into a workflow-level failure.
+deploy_attempt <- function() {
+  rsconnect::deployApp(
+    appDir         = ".",
+    appFiles       = files,
+    appPrimaryDoc  = "app.R",
+    appName        = appnm,
+    account        = acc,
+    forceUpdate    = TRUE,
+    launch.browser = FALSE
+  )
+}
+
+max_attempts <- 3
+for (attempt in seq_len(max_attempts)) {
+  result <- tryCatch(
+    {
+      deploy_attempt()
+      list(ok = TRUE, error = NULL)
+    },
+    error = function(e) list(ok = FALSE, error = e)
+  )
+  if (isTRUE(result$ok)) {
+    cat("Deploy complete.\n")
+    quit(status = 0)
+  }
+
+  msg <- conditionMessage(result$error)
+  cat(sprintf(
+    "Attempt %d/%d failed: %s\n",
+    attempt, max_attempts, msg
+  ))
+
+  # Only retry if the error looks like a transient gateway/network issue.
+  is_transient <- grepl("50[023]|gateway|timeout|connection",
+                        msg, ignore.case = TRUE)
+  if (!is_transient || attempt == max_attempts) {
+    stop(result$error)
+  }
+  cat("Transient error detected; sleeping 30s before retry...\n")
+  Sys.sleep(30)
+}
