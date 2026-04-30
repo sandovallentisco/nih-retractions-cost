@@ -18,22 +18,29 @@ if (!requireNamespace("rsconnect", quietly = TRUE)) {
   install.packages("rsconnect", repos = "https://cloud.r-project.org")
 }
 
-# rsconnect uses ``renv::snapshot`` under the hood to capture the runtime
-# library. By default renv aborts the snapshot if any transitive dependency
-# is missing from the local library, which breaks deploys whenever a binary
-# install of tidyverse leaves something like ``cpp11`` or ``progress``
-# physically absent (they get linked-in but not registered as standalone
-# packages). Disabling the strict validation lets the snapshot proceed; the
-# bundle still ships every package that ``library()`` calls require.
+# Disable renv's strict snapshot validation: the binary install of tidyverse
+# from PPM occasionally leaves transitive deps like cpp11 or progress missing
+# as standalone packages, which would otherwise abort the snapshot.
 Sys.setenv(RENV_CONFIG_VALIDATE = "FALSE")
 
-# Force rsconnect to bake CRAN URLs into the deployment manifest instead of
-# the relative ``RSPM/...`` URLs that ``use-public-rspm`` would otherwise
-# emit. shinyapps.io's build server cannot resolve the ``RSPM/`` scheme and
-# fails with ``Unsupported url scheme`` on packages it has to rebuild from
-# source (e.g. isoband). The local install in the CI runner has already
-# happened against PPM, so this only affects what URL goes into the bundle.
+# Force rsconnect to bake CRAN URLs into the deployment manifest. PPM stamps
+# the Repository field of installed packages with the literal "RSPM", which
+# shinyapps.io's build server cannot resolve.
 options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Re-install packages whose RSPM Repository field has caused shinyapps.io
+# build failures. Reinstalling from CRAN updates each package's DESCRIPTION
+# to Repository="CRAN", so the manifest URLs become resolvable absolute
+# CRAN paths. Extend this list if new packages surface in build logs.
+pkgs_to_reinstall_from_cran <- c("isoband")
+for (p in pkgs_to_reinstall_from_cran) {
+  if (p %in% rownames(installed.packages())) {
+    cat("[deploy] Reinstalling", p, "from CRAN to fix PPM URL scheme...\n")
+    suppressWarnings(remove.packages(p))
+  }
+  install.packages(p, repos = "https://cloud.r-project.org",
+                   quiet = TRUE, dependencies = FALSE)
+}
 
 acc    <- Sys.getenv("SHINYAPPS_NAME")
 tok    <- Sys.getenv("SHINYAPPS_TOKEN")
@@ -49,8 +56,8 @@ if (nchar(appnm) == 0) {
 }
 
 # Sanity-check the app name: shinyapps.io requires >=4 characters, only
-# letters, numbers, dashes and hyphens. Replace any invalid character with
-# a dash and pad with a suffix if necessary.
+# letters, numbers, dashes and hyphens. Replace invalid characters with
+# a dash and pad with a suffix if needed.
 appnm <- gsub("[^A-Za-z0-9-]", "-", appnm)
 if (nchar(appnm) < 4) {
   appnm <- paste0(appnm, "-app")
@@ -80,9 +87,8 @@ if (length(missing) > 0) {
 cat("Deploying", length(files), "files to shinyapps.io as app:", appnm, "\n")
 
 # shinyapps.io's API gateway occasionally returns transient 502 / 503 errors
-# while rsconnect polls the deployment task, even after the actual deploy
-# has succeeded. Wrap the call in a small retry loop so a network blip does
-# not turn a real success into a workflow-level failure.
+# while rsconnect polls the deployment task. Wrap deployApp in a retry loop
+# so a network blip does not turn a real success into a workflow failure.
 deploy_attempt <- function() {
   rsconnect::deployApp(
     appDir         = ".",
@@ -110,12 +116,8 @@ for (attempt in seq_len(max_attempts)) {
   }
 
   msg <- conditionMessage(result$error)
-  cat(sprintf(
-    "Attempt %d/%d failed: %s\n",
-    attempt, max_attempts, msg
-  ))
+  cat(sprintf("Attempt %d/%d failed: %s\n", attempt, max_attempts, msg))
 
-  # Only retry if the error looks like a transient gateway/network issue.
   is_transient <- grepl("50[023]|gateway|timeout|connection",
                         msg, ignore.case = TRUE)
   if (!is_transient || attempt == max_attempts) {
