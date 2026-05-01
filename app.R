@@ -147,7 +147,7 @@ nih_css <- "
 # 3. USER INTERFACE (UI)
 # ------------------------------------------------------------------------------
 ui <- navbarPage(
-  title = "NIH RePORT | Impact Analysis",
+  title = "NIH Retraction Cost Dashboard",
   inverse = TRUE,
   header = tags$head(tags$style(HTML(nih_css))),
 
@@ -158,7 +158,7 @@ ui <- navbarPage(
                     div(class = "hero-banner",
                         fluidRow(
                           column(4,
-                                 h2("Welcome to the Impact Dashboard"),
+                                 h2("Welcome to the NIH Retraction Cost Dashboard"),
                                  p("Analyzing the financial and scientific footprint of retracted research funded by the NIH.")
                           ),
                           column(8,
@@ -174,24 +174,18 @@ ui <- navbarPage(
            ),
            fluidPage(
              fluidRow(
-               column(8,
+               column(12,
                       div(class = "nih-card",
                           h4("Cost & Retraction Summary (FRED CPI Adjusted)"),
                           withSpinner(DTOutput("cost_summary_table"), type = 4, color = "#17a2b8")
-                      )
-               ),
-               column(4,
-                      div(class = "nih-card",
-                          h4("Statistical Significance (Wilcoxon Test)"),
-                          withSpinner(verbatimTextOutput("stats_output"), type = 4, color = "#17a2b8")
                       )
                )
              )
            )
   ),
 
-  # --- TAB 2: Paper Analysis ---
-  tabPanel("Paper Analysis",
+  # --- TAB 2: Article Characteristics ---
+  tabPanel("Article Characteristics",
            fluidPage(
              br(),
              fluidRow(
@@ -208,16 +202,29 @@ ui <- navbarPage(
            )
   ),
 
-  # --- TAB 3: Longitudinal Impact ---
-  tabPanel("Longitudinal Impact",
+  # --- TAB 3: Author consequences ---
+  tabPanel("Author consequences",
            fluidPage(
              br(),
              fluidRow(
-               column(12, p(strong("Note:"), " Dual-axis charts are kept in high-res static format for best visualization of trends.", style = "color: gray; font-style: italic; margin-bottom: 20px;"))
+               column(12, p(strong("Note:"), " Dual-axis charts are kept in high-res static format for best visualization of trends. ",
+                            "Bars show CPI-adjusted NIH funding awarded to authors who later had a paper retracted, ",
+                            "grouped by year offset relative to each author's first retraction (year 0). ",
+                            "The black line overlays the number of distinct authors active in that offset year (right axis).",
+                            style = "color: gray; font-style: italic; margin-bottom: 20px;"))
              ),
              fluidRow(
-               column(6, div(class = "nih-card", h4("Total Funding Contraction"), withSpinner(plotOutput("plot_total_funding"), type = 4, color = "#17a2b8"))),
-               column(6, div(class = "nih-card", h4("Average Funding per Author"), withSpinner(plotOutput("plot_avg_funding"), type = 4, color = "#17a2b8")))
+               column(6, div(class = "nih-card",
+                             h4("Total Funding to Retracted Authors"),
+                             withSpinner(plotOutput("plot_total_funding"), type = 4, color = "#17a2b8"))),
+               column(6, div(class = "nih-card",
+                             h4("Average Funding per Author"),
+                             withSpinner(plotOutput("plot_avg_funding"), type = 4, color = "#17a2b8")))
+             ),
+             fluidRow(
+               column(12, div(class = "nih-card",
+                              h4("Statistical Significance (Wilcoxon Test)"),
+                              withSpinner(verbatimTextOutput("stats_output"), type = 4, color = "#17a2b8")))
              )
            )
   )
@@ -343,9 +350,16 @@ server <- function(input, output, session) {
       geom_line(aes(y = Active_Authors * coeff_total), color = "black", linewidth = 1) +
       geom_point(aes(y = Active_Authors * coeff_total), color = "black", size = 3) +
       scale_fill_manual(values = timeline_colors) + scale_x_continuous(breaks = -3:3) +
-      scale_y_continuous(labels = label_dollar(), sec.axis = sec_axis(~./coeff_total, name = "Active Authors")) +
-      labs(x = "Years from First Retraction", y = "Total Adjusted Funding") +
-      theme_minimal(base_size = 14) + theme(legend.position = "none", panel.grid.minor = element_blank())
+      scale_y_continuous(
+        labels = label_dollar(),
+        sec.axis = sec_axis(~./coeff_total, name = "Active authors (black line)")
+      ) +
+      labs(
+        x = "Years from First Retraction",
+        y = "Total CPI-adjusted NIH funding to retracted authors ($)"
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(legend.position = "none", panel.grid.minor = element_blank())
   })
 
   output$plot_avg_funding <- renderPlot({
@@ -356,9 +370,16 @@ server <- function(input, output, session) {
       geom_line(aes(y = Active_Authors * coeff_avg), color = "black", linewidth = 1) +
       geom_point(aes(y = Active_Authors * coeff_avg), color = "black", size = 3) +
       scale_fill_manual(values = timeline_colors) + scale_x_continuous(breaks = -3:3) +
-      scale_y_continuous(labels = label_dollar(), sec.axis = sec_axis(~./coeff_avg, name = "Active Authors")) +
-      labs(x = "Years from First Retraction", y = "Average Funding Per Author") +
-      theme_minimal(base_size = 14) + theme(legend.position = "none", panel.grid.minor = element_blank())
+      scale_y_continuous(
+        labels = label_dollar(),
+        sec.axis = sec_axis(~./coeff_avg, name = "Active authors (black line)")
+      ) +
+      labs(
+        x = "Years from First Retraction",
+        y = "Average CPI-adjusted NIH funding per retracted author ($)"
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(legend.position = "none", panel.grid.minor = element_blank())
   })
 
   # --- Statistical tests ---
