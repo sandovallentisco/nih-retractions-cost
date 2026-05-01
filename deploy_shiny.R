@@ -72,10 +72,23 @@ restamp_repository_field <- function() {
 }
 restamp_repository_field()
 
-acc    <- Sys.getenv("SHINYAPPS_NAME")
-tok    <- Sys.getenv("SHINYAPPS_TOKEN")
-secret <- Sys.getenv("SHINYAPPS_SECRET")
-appnm  <- Sys.getenv("SHINYAPPS_APPNAME")
+acc    <- trimws(Sys.getenv("SHINYAPPS_NAME"))
+tok    <- trimws(Sys.getenv("SHINYAPPS_TOKEN"))
+secret <- trimws(Sys.getenv("SHINYAPPS_SECRET"))
+appnm  <- trimws(Sys.getenv("SHINYAPPS_APPNAME"))
+
+# Print credential diagnostics (lengths only; never the values themselves).
+# This catches silent issues such as a secret pasted with a trailing newline
+# or a regenerated token never updated in GitHub Secrets. Expected sizes:
+#   name   ~ 25 chars  (e.g. "z8abx8-alejandro-sandoval")
+#   token  = 32 hex chars
+#   secret ~ 76 base64 chars
+cat("[deploy] Credential lengths:",
+    "name=", nchar(acc),
+    "token=", nchar(tok),
+    "secret=", nchar(secret),
+    "appname=", nchar(appnm),
+    "\n")
 
 # Sys.getenv's `unset` default only kicks in when the variable is *unset*.
 # In CI the workflow always passes SHINYAPPS_APPNAME (potentially as an empty
