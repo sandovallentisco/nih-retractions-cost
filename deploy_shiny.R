@@ -41,9 +41,15 @@ restamp_repository_field <- function() {
   cran_url <- "https://cloud.r-project.org"
   for (lib in .libPaths()) {
     if (!dir.exists(lib)) next
+    # Skip the system R library (e.g. /opt/R/.../library) which holds base
+    # and recommended packages like ``boot`` and ``MASS``. They are shipped
+    # with R itself, are read-only for the running user, and shinyapps.io
+    # already has them, so they do not need re-stamping.
+    if (file.access(lib, mode = 2) != 0) next
     for (pkg_dir in list.dirs(lib, recursive = FALSE)) {
       desc_file <- file.path(pkg_dir, "DESCRIPTION")
       if (!file.exists(desc_file)) next
+      if (file.access(desc_file, mode = 2) != 0) next
       lines <- readLines(desc_file, warn = FALSE)
       # Match RSPM (PPM stamps), CRAN (regular install), or any leftover
       # alias and replace with the full CRAN URL. shinyapps.io concatenates
@@ -52,7 +58,13 @@ restamp_repository_field <- function() {
       idx <- grep("^Repository:\\s*(RSPM|CRAN)\\s*$", lines)
       if (length(idx) == 0) next
       lines[idx] <- paste0("Repository: ", cran_url)
-      writeLines(lines, desc_file)
+      tryCatch(
+        writeLines(lines, desc_file),
+        error = function(e) {
+          cat("[deploy]   skip", basename(pkg_dir),
+              "(not writable):", conditionMessage(e), "\n")
+        }
+      )
       patched <- patched + 1
     }
   }
