@@ -38,15 +38,20 @@ options(repos = c(CRAN = "https://cloud.r-project.org"))
 # pure metadata, so this rewrite is harmless to the runtime behaviour.
 restamp_repository_field <- function() {
   patched <- 0
+  cran_url <- "https://cloud.r-project.org"
   for (lib in .libPaths()) {
     if (!dir.exists(lib)) next
     for (pkg_dir in list.dirs(lib, recursive = FALSE)) {
       desc_file <- file.path(pkg_dir, "DESCRIPTION")
       if (!file.exists(desc_file)) next
       lines <- readLines(desc_file, warn = FALSE)
-      idx <- grep("^Repository:\\s*RSPM\\s*$", lines)
+      # Match RSPM (PPM stamps), CRAN (regular install), or any leftover
+      # alias and replace with the full CRAN URL. shinyapps.io concatenates
+      # this value with "/src/contrib/<pkg>_<ver>.tar.gz" to fetch the
+      # source, so it must be a fully qualified URL, not a short alias.
+      idx <- grep("^Repository:\\s*(RSPM|CRAN)\\s*$", lines)
       if (length(idx) == 0) next
-      lines[idx] <- "Repository: CRAN"
+      lines[idx] <- paste0("Repository: ", cran_url)
       writeLines(lines, desc_file)
       patched <- patched + 1
     }
