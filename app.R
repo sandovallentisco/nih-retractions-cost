@@ -159,11 +159,11 @@ ui <- navbarPage(
                         fluidRow(
                           column(4,
                                  h2("Welcome to the NIH Retraction Cost Dashboard"),
-                                 p("Analyzing the financial and scientific footprint of retracted research funded by the NIH.")
+                                 p("Analyzing the financial footprint of U.S. retracted research funded by the NIH.")
                           ),
                           column(8,
                                  fluidRow(
-                                   column(4, div(class = "kpi-box", p("Retracted Papers"), h3(textOutput("kpi_papers")))),
+                                   column(4, div(class = "kpi-box", p("U.S. Retracted Papers"), h3(textOutput("kpi_papers")))),
                                    column(4, div(class = "kpi-box", p("NIH Funded"), h3(textOutput("kpi_nih_papers")))),
                                    column(4, div(class = "kpi-box", p("Adj. Funding Lost"), h3(textOutput("kpi_funding"))))
                                  )
@@ -193,8 +193,30 @@ ui <- navbarPage(
                column(6, div(class = "nih-card", h4("Retraction Year"), withSpinner(plotlyOutput("plot_ret_year"), type = 4, color = "#17a2b8")))
              ),
              fluidRow(
-               column(6, div(class = "nih-card", h4("Top Publishers"), withSpinner(plotlyOutput("plot_publishers"), type = 4, color = "#17a2b8"))),
-               column(6, div(class = "nih-card", h4("Scientific Domains"), withSpinner(plotlyOutput("plot_domains"), type = 4, color = "#17a2b8")))
+               column(6, div(class = "nih-card",
+                             h4("Lag Between Publication and Retraction"),
+                             withSpinner(plotlyOutput("plot_retraction_lag"), type = 4, color = "#17a2b8"),
+                             uiOutput("lag_note"))),
+               column(6, div(class = "nih-card",
+                             h4("Lag Summary Statistics (years)"),
+                             withSpinner(tableOutput("lag_stats_table"), type = 4, color = "#17a2b8")))
+             ),
+             fluidRow(
+               column(6, div(class = "nih-card",
+                             h4("Top Publishers"),
+                             withSpinner(plotlyOutput("plot_publishers"), type = 4, color = "#17a2b8"),
+                             p(em("Note: Publishers were grouped by parent companies where possible. ",
+                                  "'Springer Nature' includes Springer, Nature, BMC, Palgrave. ",
+                                  "'Elsevier' includes Cell Press, Lancet. ",
+                                  "'Hindawi' has been separated from 'Wiley' to show its specific impact. ",
+                                  "'Taylor & Francis' includes Routledge, Dove Medical Press."),
+                               style = "color: gray; font-size: 12px; margin-top: 10px;"))),
+               column(6, div(class = "nih-card",
+                             h4("Scientific Domains"),
+                             withSpinner(plotlyOutput("plot_domains"), type = 4, color = "#17a2b8"),
+                             p(em("Note: A single paper can have multiple subjects, but each broad ",
+                                  "category is counted at most once per paper."),
+                               style = "color: gray; font-size: 12px; margin-top: 10px;")))
              ),
              fluidRow(
                column(12, div(class = "nih-card", h4("Top 10 Reasons for Retraction"), withSpinner(plotlyOutput("plot_reasons"), type = 4, color = "#17a2b8")))
@@ -242,7 +264,7 @@ server <- function(input, output, session) {
   # --- Summary table ---
   output$cost_summary_table <- renderDT({
     cost_summary_df <- data.frame(
-      Metric = c("Total Retracted Papers", "NIH Funded Papers", "Mean", "Median", "Q1", "Q3", "Total Funding Lost"),
+      Metric = c("Total U.S. Retracted Papers", "NIH Funded Papers", "Mean", "Median", "Q1", "Q3", "Total Funding Lost"),
       Raw_Attributed_Cost = c(
         nrow(df_papers), sum(!is.na(df_papers$attributed_cost_raw)),
         mean(df_papers$attributed_cost_raw, na.rm = TRUE), median(df_papers$attributed_cost_raw, na.rm = TRUE),
@@ -293,31 +315,191 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.1))
   })
 
+  # --- Retraction-lag histogram + summary ---
+  # ``retraction_lag`` was computed once when df_papers was loaded
+  # (Retraction_Year - Publication_Year). Negative values arise from
+  # metadata errors (publication date recorded after retraction date) and
+  # are filtered out, alongside rows where either year was missing.
+  LAG_AXIS_MAX <- 25  # x-axis cap for visualisation only
+
+  lag_diagnostics <- reactive({
+    full <- df_papers %>%
+      mutate(Funding_Status = ifelse(
+        !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
+        "NIH Funded", "Not NIH Funded / Other"
+      ))
+    n_total    <- nrow(full)
+    n_missing  <- sum(is.na(full$retraction_lag))
+    n_negative <- sum(full$retraction_lag < 0, na.rm = TRUE)
+    valid      <- full %>% filter(!is.na(retraction_lag) & retraction_lag >= 0)
+    n_outliers <- sum(valid$retraction_lag > LAG_AXIS_MAX, na.rm = TRUE)
+    list(
+      total     = n_total,
+      missing   = n_missing,
+      negative  = n_negative,
+      outliers  = n_outliers,
+      valid     = valid
+    )
+  })
+
+  output$plot_retraction_lag <- renderPlotly({
+    d <- lag_diagnostics()$valid
+    p <- d %>%
+      ggplot(aes(x = retraction_lag, fill = Funding_Status)) +
+      geom_histogram(binwidth = 1, color = "white", position = "stack") +
+      scale_fill_manual(values = corporate_colors) +
+      coord_cartesian(xlim = c(0, LAG_AXIS_MAX)) +
+      labs(x = "Years between Publication and Retraction", y = "Count") +
+      dashboard_theme
+    ggplotly(p, tooltip = c("x", "y", "fill")) %>%
+      layout(legend = list(orientation = "h", x = 0, y = 1.1))
+  })
+
+  output$lag_note <- renderUI({
+    diag <- lag_diagnostics()
+    HTML(sprintf(
+      paste0(
+        "<p style='color: gray; font-size: 12px; margin-top: 10px;'>",
+        "<em>Note: Distribution of the number of years elapsed between a paper's ",
+        "publication date and its retraction date. ",
+        "The X axis is capped at %d years for readability; ",
+        "<b>%s</b> paper(s) with a lag &gt; %d year(s) are excluded from the plot ",
+        "but included in the summary statistics. ",
+        "<b>%s</b> paper(s) had a negative lag (publication date after retraction, ",
+        "almost always a metadata error) and <b>%s</b> had a missing publication or ",
+        "retraction year; both groups are excluded from both the plot and the ",
+        "statistics.</em></p>"
+      ),
+      LAG_AXIS_MAX,
+      format(diag$outliers, big.mark = ","),
+      LAG_AXIS_MAX,
+      format(diag$negative, big.mark = ","),
+      format(diag$missing,  big.mark = ",")
+    ))
+  })
+
+  output$lag_stats_table <- renderTable({
+    valid <- lag_diagnostics()$valid
+
+    summarise_lag <- function(v) {
+      if (length(v) == 0) {
+        return(c("-", "-", "-", "-", "0"))
+      }
+      qs <- quantile(v, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+      c(
+        sprintf("%.2f", mean(v, na.rm = TRUE)),
+        sprintf("%.2f", qs[2]),
+        sprintf("%.2f", qs[1]),
+        sprintf("%.2f", qs[3]),
+        format(length(v), big.mark = ",")
+      )
+    }
+
+    nih_v <- valid %>% filter(Funding_Status == "NIH Funded") %>% pull(retraction_lag)
+    oth_v <- valid %>% filter(Funding_Status == "Not NIH Funded / Other") %>% pull(retraction_lag)
+
+    data.frame(
+      Statistic                = c("Mean (years)", "Median (years)",
+                                   "Q1 (years)", "Q3 (years)", "N papers"),
+      `NIH Funded`             = summarise_lag(nih_v),
+      `Not NIH Funded / Other` = summarise_lag(oth_v),
+      check.names = FALSE
+    )
+  }, striped = TRUE, hover = TRUE, spacing = "s", width = "100%")
+
   output$plot_publishers <- renderPlotly({
-    publishers_data <- df_papers %>% drop_na(Publisher) %>% mutate(Publisher = str_trim(Publisher)) %>% filter(Publisher != "") %>%
-      mutate(Funding_Status = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0, "NIH Funded", "Not NIH Funded / Other"))
-    top_20 <- publishers_data %>% count(Publisher, sort = TRUE) %>% slice_head(n = 20) %>% pull(Publisher)
-    p <- publishers_data %>% filter(Publisher %in% top_20) %>%
-      mutate(Publisher = factor(Publisher, levels = rev(top_20))) %>%
-      ggplot(aes(x = Publisher, fill = Funding_Status)) +
-      geom_bar(color = "white", position = "stack") + coord_flip() +
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "Count") + dashboard_theme
-    ggplotly(p, tooltip = c("y", "fill", "count")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.1))
+    publishers_data <- df_papers %>%
+      drop_na(Publisher) %>%
+      mutate(Publisher = str_trim(Publisher)) %>%
+      filter(Publisher != "") %>%
+      mutate(
+        Funding_Status = ifelse(
+          !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
+          "NIH Funded", "Not NIH Funded / Other"
+        ),
+        # Roll smaller imprints into their parent companies. Order matters:
+        # Hindawi must be matched before generic Wiley to keep the two
+        # branches separate in the chart.
+        Publisher_Group = case_when(
+          str_detect(Publisher, "(?i)Hindawi")                                         ~ "Hindawi (Wiley)",
+          str_detect(Publisher, "(?i)Springer|Nature|BioMed Central|BMC|Palgrave")     ~ "Springer Nature",
+          str_detect(Publisher, "(?i)Elsevier|Cell Press|Lancet|Pergamon")             ~ "Elsevier",
+          str_detect(Publisher, "(?i)Wiley")                                           ~ "Wiley (excl. Hindawi)",
+          str_detect(Publisher, "(?i)Taylor & Francis|Taylor and Francis|Routledge|Dove Medical") ~ "Taylor & Francis",
+          str_detect(Publisher, "(?i)SAGE")                                            ~ "SAGE Publications",
+          str_detect(Publisher, "(?i)IEEE")                                            ~ "IEEE",
+          str_detect(Publisher, "(?i)MDPI")                                            ~ "MDPI",
+          str_detect(Publisher, "(?i)Frontiers")                                       ~ "Frontiers",
+          str_detect(Publisher, "(?i)Public Library of Science|PLOS|PLoS")             ~ "PLOS",
+          str_detect(Publisher, "(?i)Oxford University Press|OUP")                     ~ "Oxford University Press",
+          str_detect(Publisher, "(?i)Cambridge University Press|CUP")                  ~ "Cambridge University Press",
+          TRUE                                                                         ~ Publisher
+        )
+      )
+    top_20 <- publishers_data %>%
+      count(Publisher_Group, sort = TRUE) %>%
+      slice_head(n = 20) %>%
+      pull(Publisher_Group)
+    p <- publishers_data %>%
+      filter(Publisher_Group %in% top_20) %>%
+      mutate(Publisher_Group = factor(Publisher_Group, levels = rev(top_20))) %>%
+      ggplot(aes(x = Publisher_Group, fill = Funding_Status)) +
+      geom_bar(color = "white", position = "stack") +
+      coord_flip() +
+      scale_fill_manual(values = corporate_colors) +
+      labs(x = "", y = "Count") +
+      dashboard_theme
+    ggplotly(p, tooltip = c("y", "fill", "count")) %>%
+      layout(legend = list(orientation = "h", x = 0, y = 1.1))
   })
 
   output$plot_domains <- renderPlotly({
-    domains_data <- df_papers %>% drop_na(Subject) %>% mutate(Paper_ID = row_number()) %>%
-      separate_rows(Subject, sep = ";") %>% mutate(Subject = str_trim(Subject)) %>% filter(Subject != "") %>%
-      mutate(Funding_Status = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0, "NIH Funded", "Not NIH Funded / Other"),
-             Domain_Acronym = str_remove_all(str_extract(Subject, "^\\([^)]+\\)"), "[()]")) %>%
-      mutate(Domain_Full = case_when(Domain_Acronym == "BLS" ~ "Biological & Life Sciences", Domain_Acronym == "HSC" ~ "Health Sciences",
-                                     Domain_Acronym == "PHY" ~ "Physical Sciences", TRUE ~ Domain_Acronym)) %>%
+    domains_data <- df_papers %>%
+      drop_na(Subject) %>%
+      mutate(Paper_ID = row_number()) %>%
+      separate_rows(Subject, sep = ";") %>%
+      mutate(Subject = str_trim(Subject)) %>%
+      filter(Subject != "") %>%
+      mutate(
+        Funding_Status = ifelse(
+          !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
+          "NIH Funded", "Not NIH Funded / Other"
+        ),
+        # Pull the leading "(XYZ)" tag from the Subject, keeping the
+        # parentheses for an explicit case_when match below.
+        Acronym = str_extract(Subject, "^\\([^)]+\\)")
+      ) %>%
+      mutate(
+        Domain_Full = case_when(
+          Acronym == "(B/T)" ~ "Business & Technology",
+          Acronym == "(BLS)" ~ "Biological Sciences",
+          Acronym == "(ENV)" ~ "Environmental Sciences",
+          Acronym == "(HSC)" ~ "Health Sciences",
+          Acronym == "(HUM)" ~ "Humanities",
+          Acronym == "(PHY)" ~ "Physical Sciences",
+          Acronym == "(SOC)" ~ "Social Sciences",
+          TRUE               ~ NA_character_
+        )
+      ) %>%
+      filter(!is.na(Domain_Full)) %>%
+      # A paper can list several subjects under the same broad category
+      # (e.g. two BLS sub-fields). distinct() keeps each broad category at
+      # most once per paper so the bar height reflects unique papers, not
+      # sub-field repetitions.
       distinct(Paper_ID, Domain_Full, Funding_Status)
-    domain_order <- domains_data %>% count(Domain_Full, sort = TRUE) %>% pull(Domain_Full)
-    p <- domains_data %>% mutate(Domain_Full = factor(Domain_Full, levels = rev(domain_order))) %>%
-      ggplot(aes(x = Domain_Full, fill = Funding_Status)) + geom_bar(color = "white", position = "stack") + coord_flip() +
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "Count") + dashboard_theme
-    ggplotly(p, tooltip = c("y", "fill", "count")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.1))
+    domain_order <- domains_data %>%
+      count(Domain_Full, sort = TRUE) %>%
+      pull(Domain_Full)
+    p <- domains_data %>%
+      mutate(Domain_Full = factor(Domain_Full, levels = rev(domain_order))) %>%
+      ggplot(aes(x = Domain_Full, fill = Funding_Status)) +
+      geom_bar(color = "white", position = "stack") +
+      coord_flip() +
+      scale_fill_manual(values = corporate_colors) +
+      labs(x = "", y = "Count") +
+      dashboard_theme
+    ggplotly(p, tooltip = c("y", "fill", "count")) %>%
+      layout(legend = list(orientation = "h", x = 0, y = 1.1))
   })
 
   output$plot_reasons <- renderPlotly({
