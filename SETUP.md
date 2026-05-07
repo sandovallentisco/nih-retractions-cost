@@ -1,7 +1,7 @@
 # Setup de la automatizacion
 
 Este documento explica los pasos manuales que tienes que hacer **una sola vez**
-para que el pipeline corra solo cada 3 meses y la dashboard se redeploye sola.
+para que el pipeline corra solo cada semana y la dashboard se redeploye sola.
 
 ## 1. Subir el proyecto a GitHub
 
@@ -58,17 +58,17 @@ git push
 
 ## 5. Probar el workflow manualmente
 
-En GitHub: pestana **Actions -> Quarterly pipeline update -> Run workflow**.
+En GitHub: pestana **Actions -> Weekly pipeline update -> Run workflow**.
 Puedes elegir si redeployar la Shiny o no, y que pasos correr.
 
 ## 6. Activar el cron
 
-El cron ya esta definido en `.github/workflows/quarterly_update.yml`:
+El cron ya esta definido en `.github/workflows/weekly_update.yml`:
 
 ```yaml
 on:
   schedule:
-    - cron: "0 6 1 */3 *"   # 06:00 UTC del dia 1, cada 3 meses
+    - cron: "0 6 * * 0"   # 06:00 UTC todos los domingos
 ```
 
 A partir del primer push se activa solo. **Atencion**: GitHub desactiva el
@@ -134,7 +134,7 @@ The workflow URL is fixed at
 ``https://github.com/<owner>/<repo>/releases/latest/download/nih_raw.tar.gz``,
 which always resolves to the most recent release.
 
-### Quarterly refresh (manual, ~5 minutes)
+### Periodic refresh (manual, ~5 minutes)
 
 Once a year, when NIH publishes a new full fiscal year (typically around
 September), refresh the snapshot:
