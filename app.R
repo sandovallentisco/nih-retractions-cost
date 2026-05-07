@@ -962,23 +962,24 @@ server <- function(input, output, session) {
   
   
   output$plot_avg_funding <- renderPlotly({
-    
     tl <- df_timeline()
     
-    p <- ggplot(tl, aes(x = diff_retracted, y = Average_Funding_Per_Author, fill = Period_Label, text = paste("Year offset:", diff_retracted, "<br>Average Funding:", dollar(Average_Funding_Per_Author)))) +
-      
-      geom_col(color = "white", width = 0.8) +
-      
-      scale_fill_manual(values = timeline_colors) + scale_x_continuous(breaks = -3:3) +
-      
-      scale_y_continuous(labels = label_dollar()) +
-      
+    p <- ggplot(tl, aes(x = diff_retracted, y = Average_Funding_Per_Author, 
+                        text = paste("Year offset:", diff_retracted, "<br>Average Funding:", dollar(Average_Funding_Per_Author)))) +
+      # 1. Add a dashed vertical reference line at Year 0 (Retraction Year)
+      geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8) +
+      # 2. The main trend line connecting all points
+      geom_line(color = "#005b96", linewidth = 1, group = 1) +
+      # 3. The points on top, colored based on the period
+      geom_point(aes(color = Period_Label), size = 4) +
+      scale_color_manual(values = timeline_colors) + 
+      scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
+      # --- Set the Y-axis limits to zoom in on the 500k-800k range ---
+      scale_y_continuous(labels = label_dollar(), limits = c(500000, 800000)) +
       labs(x = "Years from First Retraction", y = "Average Funding ($)") +
-      
       dashboard_theme + theme(legend.position = "none")
     
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
-    
   })
   
   
