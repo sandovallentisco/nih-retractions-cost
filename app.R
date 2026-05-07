@@ -848,198 +848,129 @@ server <- function(input, output, session) {
   
   
   output$plot_publishers <- renderPlotly({
-    
     publishers_data <- df_papers %>%
-      
       drop_na(Publisher) %>%
-      
       mutate(Publisher = str_trim(Publisher)) %>%
-      
       filter(Publisher != "") %>%
-      
       mutate(
-        
         Funding_Status = ifelse(
-          
           !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
-          
           "NIH Funded", "Not NIH Funded / Other"
-          
         ),
-        
-        # Roll smaller imprints into their parent companies. Order matters:
-        
-        # Hindawi must be matched before generic Wiley to keep the two
-        
-        # branches separate in the chart.
-        
         Publisher_Group = case_when(
-          
           str_detect(Publisher, "(?i)Hindawi")                                         ~ "Hindawi (Wiley)",
-          
           str_detect(Publisher, "(?i)Springer|Nature|BioMed Central|BMC|Palgrave")     ~ "Springer Nature",
-          
           str_detect(Publisher, "(?i)Elsevier|Cell Press|Lancet|Pergamon")             ~ "Elsevier",
-          
           str_detect(Publisher, "(?i)Wiley")                                           ~ "Wiley (excl. Hindawi)",
-          
           str_detect(Publisher, "(?i)Taylor & Francis|Taylor and Francis|Routledge|Dove Medical") ~ "Taylor & Francis",
-          
           str_detect(Publisher, "(?i)SAGE")                                            ~ "SAGE Publications",
-          
           str_detect(Publisher, "(?i)IEEE")                                            ~ "IEEE",
-          
           str_detect(Publisher, "(?i)MDPI")                                            ~ "MDPI",
-          
           str_detect(Publisher, "(?i)Frontiers")                                       ~ "Frontiers",
-          
           str_detect(Publisher, "(?i)Public Library of Science|PLOS|PLoS")             ~ "PLOS",
-          
           str_detect(Publisher, "(?i)Oxford University Press|OUP")                     ~ "Oxford University Press",
-          
           str_detect(Publisher, "(?i)Cambridge University Press|CUP")                  ~ "Cambridge University Press",
-          
           TRUE                                                                         ~ Publisher
-          
         )
-        
       )
     
     top_20 <- publishers_data %>%
-      
       count(Publisher_Group, sort = TRUE) %>%
-      
       slice_head(n = 20) %>%
-      
       pull(Publisher_Group)
     
     p <- publishers_data %>%
-      
       filter(Publisher_Group %in% top_20) %>%
-      
       mutate(Publisher_Group = factor(Publisher_Group, levels = rev(top_20))) %>%
-      
       rename(`Publisher Group` = Publisher_Group, `Funding Status` = Funding_Status) %>%
-      
       count(`Publisher Group`, `Funding Status`, name = "No. of articles") %>%
-      
-      ggplot(aes(x = `Publisher Group`, y = `No. of articles`, fill = `Funding Status`)) +
-      
-      geom_col(color = "white", position = "stack") +
-      
-      coord_flip() +
-      
+      # --- 1. NATIVE MAPPING: y is categorical, x is continuous ---
+      ggplot(aes(y = `Publisher Group`, x = `No. of articles`, fill = `Funding Status`)) +
+      geom_col(color = "white", position = "stack", width = 0.8) +
+      # --- 2. THE GAP FIX: 0 padding on the left, 5% padding on the right ---
+      scale_x_continuous(expand = expansion(mult = c(0.01, 0.05))) +
       scale_fill_manual(values = corporate_colors) +
-      
-      labs(x = "", y = "No. of articles") +
-      
-      dashboard_theme
+      labs(y = "", x = "No. of articles") +
+      dashboard_theme +
+      # --- 4. GRID LINES: Vertical instead of horizontal ---
+      theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5)
+      )
+    
+    # Calculate exactly how many bars exist for the clipping fix below
+    n_categories <- length(top_20)
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>%
-      
-      layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
-    
+      layout(
+        # --- 3. CLIPPING FIX: Force Plotly's Y-axis bounds ---
+        yaxis = list(range = c(0.5, n_categories + 0.5)),
+        legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), 
+        margin = list(t = 80, r = 20)
+      )
   })
   
   
   output$plot_domains <- renderPlotly({
-    
     domains_data <- df_papers %>%
-      
       drop_na(Subject) %>%
-      
       mutate(Paper_ID = row_number()) %>%
-      
       separate_rows(Subject, sep = ";") %>%
-      
       mutate(Subject = str_trim(Subject)) %>%
-      
       filter(Subject != "") %>%
-      
       mutate(
-        
         Funding_Status = ifelse(
-          
           !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
-          
           "NIH Funded", "Not NIH Funded / Other"
-          
         ),
-        
-        # Pull the leading "(XYZ)" tag from the Subject, keeping the
-        
-        # parentheses for an explicit case_when match below.
-        
         Acronym = str_extract(Subject, "^\\([^)]+\\)")
-        
       ) %>%
-      
       mutate(
-        
         Domain_Full = case_when(
-          
           Acronym == "(B/T)" ~ "Business & Technology",
-          
           Acronym == "(BLS)" ~ "Biological Sciences",
-          
           Acronym == "(ENV)" ~ "Environmental Sciences",
-          
           Acronym == "(HSC)" ~ "Health Sciences",
-          
           Acronym == "(HUM)" ~ "Humanities",
-          
           Acronym == "(PHY)" ~ "Physical Sciences",
-          
           Acronym == "(SOC)" ~ "Social Sciences",
-          
           TRUE               ~ NA_character_
-          
         )
-        
       ) %>%
-      
       filter(!is.na(Domain_Full)) %>%
-      
-      # A paper can list several subjects under the same broad category
-      
-      # (e.g. two BLS sub-fields). distinct() keeps each broad category at
-      
-      # most once per paper so the bar height reflects unique papers, not
-      
-      # sub-field repetitions.
-      
       distinct(Paper_ID, Domain_Full, Funding_Status)
     
     domain_order <- domains_data %>%
-      
       count(Domain_Full, sort = TRUE) %>%
-      
       pull(Domain_Full)
     
     p <- domains_data %>%
-      
       mutate(Domain_Full = factor(Domain_Full, levels = rev(domain_order))) %>%
-      
       rename(`Domain Full` = Domain_Full, `Funding Status` = Funding_Status) %>%
-      
       count(`Domain Full`, `Funding Status`, name = "No. of articles") %>%
-      
-      ggplot(aes(x = `Domain Full`, y = `No. of articles`, fill = `Funding Status`)) +
-      
-      geom_col(color = "white", position = "stack") +
-      
-      coord_flip() +
-      
+      # Native mapping: y is categorical, x is continuous
+      ggplot(aes(y = `Domain Full`, x = `No. of articles`, fill = `Funding Status`)) +
+      geom_col(color = "white", position = "stack", width = 0.8) +
+      # Snap bars flush to the Y-axis
+      scale_x_continuous(expand = expansion(mult = c(0.03, 0.05))) +
       scale_fill_manual(values = corporate_colors) +
-      
-      labs(x = "", y = "No. of articles") +
-      
-      dashboard_theme
+      labs(y = "", x = "No. of articles") +
+      dashboard_theme +
+      # Vertical grid lines
+      theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5)
+      )
+    
+    # Calculate exact number of categories to prevent clipping
+    n_categories <- length(domain_order)
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>%
-      
-      layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
-    
+      layout(
+        yaxis = list(range = c(0.5, n_categories + 0.5)),
+        legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), 
+        margin = list(t = 80, r = 20)
+      )
   })
   
   
@@ -1063,7 +994,13 @@ server <- function(input, output, session) {
       
       ggplot(aes(x = Reason, y = `No. of articles`, fill = `Funding Status`)) + geom_col(color = "white", position = "stack") + coord_flip() +
       
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme
+      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme +
+      
+      # Vertical grid lines
+      theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5)
+      )
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
     
