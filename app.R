@@ -849,7 +849,12 @@ server <- function(input, output, session) {
       rename(`Domain Full` = Domain_Full, `Funding Status` = Funding_Status) %>%
       count(`Domain Full`, `Funding Status`, name = "No. of articles") %>%
       ggplot(aes(x = `Domain Full`, y = `No. of articles`, fill = `Funding Status`)) + geom_col(color = "white", position = "stack") + coord_flip() +
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme
+      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme +
+      # --- Vertical grid lines instead of horizontal ---
+      theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5)
+      )
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
   })
@@ -875,7 +880,12 @@ server <- function(input, output, session) {
       
       ggplot(aes(x = Reason, y = `No. of articles`, fill = `Funding Status`)) + geom_col(color = "white", position = "stack") + coord_flip() +
       
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme
+      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme +
+      # --- Vertical grid lines instead of horizontal ---
+      theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5)
+      )
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
     
