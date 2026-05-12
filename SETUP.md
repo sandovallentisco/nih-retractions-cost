@@ -1,54 +1,54 @@
-# Setup de la automatizacion
+# Automation Setup
 
-Este documento explica los pasos manuales que tienes que hacer **una sola vez**
-para que el pipeline corra solo cada semana y la dashboard se redeploye sola.
+This document explains the manual steps you need to perform **only once**
+so that the pipeline runs automatically every week and the dashboard is redeployed by itself.
 
-## 1. Subir el proyecto a GitHub
+## 1. Push the project to GitHub
 
 ```bash
-cd "ruta/al/proyecto"
+cd "path/to/project"
 git init
 git add .
 git commit -m "Initial commit"
 git branch -M main
-git remote add origin git@github.com:<TU_USUARIO>/<TU_REPO>.git
+git remote add origin git@github.com:<YOUR_USER>/<YOUR_REPO>.git
 git push -u origin main
 ```
 
-## 2. Configurar los secrets del repositorio
+## 2. Configure repository secrets
 
-En GitHub: **Settings -> Secrets and variables -> Actions -> New repository secret**.
-Anhade estos:
+On GitHub: **Settings -> Secrets and variables -> Actions -> New repository secret**.
+Add these:
 
-| Secret              | Para que sirve                                | Donde se obtiene                                          |
+| Secret              | Purpose                                       | Where to get it                                           |
 |---------------------|-----------------------------------------------|-----------------------------------------------------------|
-| `ENTREZ_EMAIL`      | Identificarte ante NCBI/PubMed                | Tu email                                                  |
-| `ENTREZ_API_KEY`    | Subir el rate-limit de PubMed                 | https://www.ncbi.nlm.nih.gov/account/settings/            |
-| `SHINYAPPS_NAME`    | Cuenta de shinyapps.io                        | Panel de shinyapps.io, parte superior izquierda           |
-| `SHINYAPPS_TOKEN`   | Token API de shinyapps.io                     | Panel -> Account -> Tokens -> Show -> Token               |
-| `SHINYAPPS_SECRET`  | Secret asociado al token                      | Panel -> Account -> Tokens -> Show -> Secret              |
-| `SHINYAPPS_APPNAME` | (Opcional) Nombre publico de la app           | Por defecto: `nih-retractions`                            |
-| `GITLAB_TOKEN`      | (Opcional) Solo si el repo de RW es privado   | https://gitlab.com -> User Settings -> Access Tokens      |
+| `ENTREZ_EMAIL`      | Identify yourself to NCBI/PubMed              | Your email                                                |
+| `ENTREZ_API_KEY`    | Increase PubMed's rate-limit                  | https://www.ncbi.nlm.nih.gov/account/settings/            |
+| `SHINYAPPS_NAME`    | shinyapps.io account name                     | shinyapps.io dashboard, top left                          |
+| `SHINYAPPS_TOKEN`   | shinyapps.io API Token                        | Dashboard -> Account -> Tokens -> Show -> Token           |
+| `SHINYAPPS_SECRET`  | Secret associated with the token              | Dashboard -> Account -> Tokens -> Show -> Secret          |
+| `SHINYAPPS_APPNAME` | (Optional) Public app name                    | Default: `nih-retractions`                                |
+| `GITLAB_TOKEN`      | (Optional) Only if the RW repo is private     | https://gitlab.com -> User Settings -> Access Tokens      |
 
-## 3. Crear la cuenta de shinyapps.io (si aun no la tienes)
+## 3. Create a shinyapps.io account (if you don't have one)
 
-1. Registrate gratis en https://www.shinyapps.io.
-2. Account -> Tokens -> Show. Copia `Name`, `Token` y `Secret` en los secrets
-   de GitHub correspondientes.
-3. Plan gratuito: 25 horas-app/mes y hasta 5 apps activas. Suficiente para
-   un dashboard academico de trafico moderado.
+1. Register for free at https://www.shinyapps.io.
+2. Account -> Tokens -> Show. Copy `Name`, `Token` and `Secret` to the corresponding
+   GitHub secrets.
+3. Free plan: 25 app-hours/month and up to 5 active apps. Sufficient for
+   an academic dashboard with moderate traffic.
 
-## 4. Primera ejecucion (setup completo)
+## 4. First run (full setup)
 
-La primera vez **tienes que descargar todos los archivos historicos de NIH**
-(unos cientos de MB) en local:
+The first time **you have to download all historical NIH files**
+(a few hundred MB) locally:
 
 ```bash
 python -m src.downloader --full
 python main.py --steps all
 ```
 
-Esto deja los CSVs procesados en `data/processed/`. Comitea esos cambios:
+This leaves the processed CSVs in `data/processed/`. Commit these changes:
 
 ```bash
 git add data/processed/*.csv
@@ -56,48 +56,48 @@ git commit -m "chore(data): initial processed CSVs"
 git push
 ```
 
-## 5. Probar el workflow manualmente
+## 5. Test the workflow manually
 
-En GitHub: pestana **Actions -> Weekly pipeline update -> Run workflow**.
-Puedes elegir si redeployar la Shiny o no, y que pasos correr.
+On GitHub: **Actions** tab **-> Weekly pipeline update -> Run workflow**.
+You can choose whether to redeploy Shiny or not, and which steps to run.
 
-## 6. Activar el cron
+## 6. Activate the cron
 
-El cron ya esta definido en `.github/workflows/weekly_update.yml`:
+The cron is already defined in `.github/workflows/weekly_update.yml`:
 
 ```yaml
 on:
   schedule:
-    - cron: "0 6 * * 0"   # 06:00 UTC todos los domingos
+    - cron: "0 6 * * 0"   # 06:00 UTC every Sunday
 ```
 
-A partir del primer push se activa solo. **Atencion**: GitHub desactiva el
-cron de un repo si no ha habido actividad en 60 dias. Para mantenerlo vivo
-basta con hacer un commit cada par de meses (o el propio workflow al
-commitear los CSVs procesados resetea ese contador).
+It activates automatically after the first push. **Note**: GitHub disables a repository's
+cron if there has been no activity for 60 days. To keep it alive
+you just need to make a commit every couple of months (or the workflow itself
+will reset this counter when committing the processed CSVs).
 
-## 7. Que sucede en cada corrida
+## 7. What happens in each run
 
-1. Descarga `retraction_watch.csv` desde GitLab.
-2. Descarga el FY actual + 2 anteriores de NIH ExPORTER (incremental).
-3. Corre `main.py --steps all` con la cache de PubMed (solo consulta
-   los DOIs nuevos -> el step 1 baja de 1.5h a unos minutos).
-4. Commitea `data/processed/*.csv` (incluida la cache de PubMed) al repo.
-5. Redeploya `app.R` en shinyapps.io con los CSVs nuevos.
+1. Downloads `retraction_watch.csv` from GitLab.
+2. Downloads the entire NIH ExPORTER raw data snapshot (`nih_raw.tar.gz`) from the GitHub Release.
+3. Runs `main.py --steps all` with PubMed cache (only queries
+   new DOIs -> step 1 goes down from 1.5h to a few minutes).
+4. Commits `data/processed/*.csv` (including PubMed cache) to the repo.
+5. Redeploys `app.R` on shinyapps.io with the new CSVs.
 
 ## Troubleshooting
 
-- **El workflow tarda mas de 6h y se cancela**: revisa que la cache se
-  haya commiteado en la corrida anterior (`data/processed/pubmed_cache.csv`).
-  Sin cache, el step 1 vuelve a tardar 1.5h.
-- **NIH cambia el formato del CSV**: GitHub Actions te enviara un email al
-  fallar el workflow. Mira los logs en la pestana Actions.
-- **shinyapps.io se queda sin horas**: pasate al plan Starter ($9/mes) o
-  desactiva el deploy automatico (`deploy_shiny: false` al lanzar el workflow
-  manualmente) y deploya manualmente cuando convenga.
-- **Invalidar la cache de PubMed**: borra
-  `data/processed/pubmed_cache.csv` y haz push. La siguiente corrida la
-  reconstruye desde cero.
+- **The workflow takes more than 6h and cancels**: check that the cache was
+  committed in the previous run (`data/processed/pubmed_cache.csv`).
+  Without the cache, step 1 takes 1.5h again.
+- **NIH changes the CSV format**: GitHub Actions will send you an email when
+  the workflow fails. Check the logs in the Actions tab.
+- **shinyapps.io runs out of hours**: upgrade to the Starter plan ($9/month) or
+  disable auto-deploy (`deploy_shiny: false` when triggering the workflow
+  manually) and deploy manually when necessary.
+- **Invalidate the PubMed cache**: delete
+  `data/processed/pubmed_cache.csv` and push. The next run will
+  rebuild it from scratch.
 
 ---
 

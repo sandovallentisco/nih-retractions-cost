@@ -254,7 +254,7 @@ ui <- navbarPage(
                column(6, div(class = "nih-card",
                              h4("Average Funding Granted to Retracted Authors"), # TITULO MODIFICADO
                              withSpinner(plotlyOutput("plot_avg_funding"), type = 4, color = "#17a2b8"),
-                             p(em("Note: The average is calculated across the entire cohort. Authors receiving no funding in a given year are counted as $0, reflecting the formula: Total Funding = Average Funding × Total Authors."), style = "color: gray; font-size: 12px; margin-top: 10px;"))),
+                             p(em("Note: The average is calculated across the entire cohort. Authors receiving no funding in a given year are counted as $0, reflecting the formula: Average Funding (Year X) = Total Funding (Year X) / Total Retracted Authors in the Entire Cohort."), style = "color: gray; font-size: 12px; margin-top: 10px;"))),
                column(6, div(class = "nih-card",
                              h4("Average Funding Statistics"), # TITULO MODIFICADO
                              withSpinner(uiOutput("stats_avg_funding"), type = 4, color = "#17a2b8")))
