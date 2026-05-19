@@ -76,6 +76,11 @@ df_papers <- read_csv(papers_file, show_col_types = FALSE) %>%
 
 # --- LOAD AUTHORS ---
 df_authors_raw <- read_csv(authors_file, show_col_types = FALSE)
+
+author_retractions <- df_authors_raw %>%
+  group_by(Original_Author_Name) %>%
+  summarise(Num_Retractions = n_distinct(Record_ID), .groups = "drop")
+
 df_authors <- df_authors_raw %>%
   group_by(Original_Author_Name) %>%
   mutate(First_Retraction_Year = min(Retraction_Year, na.rm = TRUE)) %>%
@@ -83,7 +88,8 @@ df_authors <- df_authors_raw %>%
   mutate(diff_retracted = Fiscal_Year - First_Retraction_Year) %>%
   distinct(Original_Author_Name, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
   left_join(annual_cpi, by = "Fiscal_Year") %>%
-  mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier)
+  mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier) %>%
+  left_join(author_retractions, by = "Original_Author_Name")
 
 # --- GLOBAL PLOT THEME ---
 # Transparent backgrounds so plots blend with the dashboard cards.
@@ -247,48 +253,29 @@ ui <- navbarPage(
            fluidPage(
              br(),
              fluidRow(
-               column(12, p(strong("Note:"), " The charts below show CPI-adjusted NIH funding and activity for authors who had a paper retracted. Data is grouped by year offset relative to each author's first retraction (year 0). ",
-                            style = "color: gray; font-style: italic; margin-bottom: 20px;"))
+               column(8, p(strong("Note:"), " The charts below show CPI-adjusted NIH funding and activity for authors who had a paper retracted. Data is grouped by year offset relative to each author's first retraction (year 0). ",
+                            style = "color: gray; font-style: italic; margin-bottom: 20px;")),
+               column(4, selectInput("author_cohort_filter", HTML("<span style='white-space: nowrap;'>Sensitivity Analysis (Retracted Papers per Author):</span>"), 
+                                     choices = c("All Authors" = "all", "1 Paper Retracted" = "one", ">1 Papers Retracted" = "more"),
+                                     selected = "all", width = "100%"))
              ),
              fluidRow(
                column(6, div(class = "nih-card",
                              h4("Average Funding Granted to Retracted Authors"), # TITULO MODIFICADO
                              withSpinner(plotlyOutput("plot_avg_funding"), type = 4, color = "#17a2b8"),
-                             p(em("Note: The average is calculated across the entire cohort. Authors receiving no funding in a given year are counted as $0, reflecting the formula: Average Funding (Year X) = Total Funding (Year X) / Total Retracted Authors in the Entire Cohort."), style = "color: gray; font-size: 12px; margin-top: 10px;"))),
+                             uiOutput("plot_avg_funding_note"))),
                column(6, div(class = "nih-card",
                              h4("Average Funding Statistics"), # TITULO MODIFICADO
                              withSpinner(uiOutput("stats_avg_funding"), type = 4, color = "#17a2b8")))
              ),
              fluidRow(
                column(6, div(class = "nih-card",
-                             h4("Total Authors in Cohort"),
-                             withSpinner(plotlyOutput("plot_cohort_authors"), type = 4, color = "#17a2b8"))),
+                             h4("Total Active Grants"),
+                             withSpinner(plotlyOutput("plot_active_grants"), type = 4, color = "#17a2b8"),
+                             p(em("Note: Because multiple retracted authors can be funded by the exact same NIH grant (e.g., as co-investigators), the total distinct grants across subgroups will not sum perfectly to the overall 'All Authors' total due to these shared grants being counted in both groups."), style = "color: gray; font-size: 12px; margin-top: 10px;"))),
                column(6, div(class = "nih-card",
-                             h4("Cohort Statistics"),
-                             withSpinner(uiOutput("stats_cohort_authors"), type = 4, color = "#17a2b8")))
-             ),
-             fluidRow(
-               column(6, div(class = "nih-card",
-                             h4("Total Funding"),
-                             withSpinner(plotlyOutput("plot_total_funding"), type = 4, color = "#17a2b8"))),
-               column(6, div(class = "nih-card",
-                             h4("Total Funding Statistics"),
-                             withSpinner(uiOutput("stats_total_funding"), type = 4, color = "#17a2b8")))
-             ),
-             fluidRow(
-               column(8, div(class = "nih-card",
-                             h4("Funding Change (Priorly Funded Authors)"),
-                             withSpinner(plotlyOutput("plot_impact_dist"), type = 4, color = "#17a2b8"),
-                             p(em("Note: Histogram showing the percentage change in average annual funding (Pre vs Post). Excludes authors who had $0 funding before their retraction. Increases above +200% are grouped together for visual clarity."), style = "color: gray; font-size: 12px; margin-top: 10px;"))),
-               column(4, div(class = "nih-card",
-                             h4("Funded Group Stats"),
-                             withSpinner(uiOutput("stats_funded_only"), type = 4, color = "#17a2b8")))
-             ),
-             fluidRow(
-               column(12, div(class = "nih-card",
-                              h4("Top 10 Most Affected Authors"),
-                              withSpinner(DTOutput("table_top_affected"), type = 4, color = "#17a2b8"),
-                              p(em("Note: Shows the individuals who suffered the largest absolute drop in average annual funding (Pre vs Post)."), style = "color: gray; font-size: 12px; margin-top: 10px;")))
+                             h4("Active Grants Statistics"),
+                             withSpinner(uiOutput("stats_active_grants"), type = 4, color = "#17a2b8")))
              )
            )
   )
@@ -306,23 +293,21 @@ server <- function(input, output, session) {
   # --- Summary table ---
   output$cost_summary_table <- renderDT({
     cost_summary_df <- data.frame(
-      Metric = c("Total U.S. Retracted Papers", "NIH Funded Papers", "Mean", "Median", "Q1", "Q3", "Total Funding Lost"),
+      Metric = c("Mean", "Median", "Q1", "Q3", "Total Funding Lost"),
       Raw_Attributed_Cost = c(
-        nrow(df_papers), sum(!is.na(df_papers$attributed_cost_raw)),
         mean(df_papers$attributed_cost_raw, na.rm = TRUE), median(df_papers$attributed_cost_raw, na.rm = TRUE),
         quantile(df_papers$attributed_cost_raw, 0.25, na.rm = TRUE), quantile(df_papers$attributed_cost_raw, 0.75, na.rm = TRUE),
         sum(df_papers$attributed_cost_raw, na.rm = TRUE)
       ),
       Adjusted_Cost_Current = c(
-        nrow(df_papers), sum(!is.na(df_papers$attributed_cost_adjusted)),
         mean(df_papers$attributed_cost_adjusted, na.rm = TRUE), median(df_papers$attributed_cost_adjusted, na.rm = TRUE),
         quantile(df_papers$attributed_cost_adjusted, 0.25, na.rm = TRUE), quantile(df_papers$attributed_cost_adjusted, 0.75, na.rm = TRUE),
         sum(df_papers$attributed_cost_adjusted, na.rm = TRUE)
       )
     ) %>%
       mutate(
-        Raw_Attributed_Cost   = ifelse(Metric %in% c("Total U.S. Retracted Papers", "NIH Funded Papers"), comma(Raw_Attributed_Cost),   dollar(Raw_Attributed_Cost,   accuracy = 1)),
-        Adjusted_Cost_Current = ifelse(Metric %in% c("Total U.S. Retracted Papers", "NIH Funded Papers"), comma(Adjusted_Cost_Current), dollar(Adjusted_Cost_Current, accuracy = 1))
+        Raw_Attributed_Cost   = dollar(Raw_Attributed_Cost,   accuracy = 1),
+        Adjusted_Cost_Current = dollar(Adjusted_Cost_Current, accuracy = 1)
       ) %>%
       rename(
         `Raw Attributed Cost` = Raw_Attributed_Cost,
@@ -542,13 +527,27 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
   })
   
+  # --- Filtered Authors Reactive ---
+  filtered_authors <- reactive({
+    req(input$author_cohort_filter)
+    if (input$author_cohort_filter == "one") {
+      df_authors %>% filter(Num_Retractions == 1)
+    } else if (input$author_cohort_filter == "more") {
+      df_authors %>% filter(Num_Retractions > 1)
+    } else {
+      df_authors
+    }
+  })
+
   # --- Longitudinal impact ---
   df_timeline <- reactive({
-    total_cohort_authors <- n_distinct(df_authors$Original_Author_Name)
+    fa <- filtered_authors()
+    total_cohort_authors <- n_distinct(fa$Original_Author_Name)
     
-    df_authors %>% filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+    fa %>% filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
       group_by(diff_retracted) %>%
-      summarise(Total_Adjusted_Funding = sum(Funding_Adjusted, na.rm = TRUE)) %>%
+      summarise(Total_Adjusted_Funding = sum(Funding_Adjusted, na.rm = TRUE),
+                Active_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)])) %>%
       mutate(Cohort_Authors = total_cohort_authors,
              Average_Funding_Per_Author = Total_Adjusted_Funding / total_cohort_authors,
              Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"))
@@ -556,16 +555,16 @@ server <- function(input, output, session) {
   
   timeline_colors <- c("Retraction Year (0)" = "#cccccc", "Normal Years" = "#005b96")
   
-  output$plot_cohort_authors <- renderPlotly({
+  output$plot_active_grants <- renderPlotly({
     tl <- df_timeline()
-    p <- ggplot(tl, aes(x = diff_retracted, y = Cohort_Authors, text = paste("Year offset:", diff_retracted, "<br>Total Authors:", comma(Cohort_Authors)))) +
+    p <- ggplot(tl, aes(x = diff_retracted, y = Active_Grants, text = paste("Year offset:", diff_retracted, "<br>Active Grants:", comma(Active_Grants)))) +
       geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8) +
       geom_line(color = "#005b96", linewidth = 0.5, group = 1) +
       geom_point(aes(color = Period_Label), size = 2) +
       scale_color_manual(values = timeline_colors) +
       scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
       scale_y_continuous(labels = comma, limits = c(0, NA)) +
-      labs(x = "Years from First Retraction", y = "Total Authors in Cohort") +
+      labs(x = "Years from First Retraction", y = "Total Active Grants") +
       dashboard_theme + theme(legend.position = "none")
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
   })
@@ -593,81 +592,35 @@ server <- function(input, output, session) {
       geom_point(aes(color = Period_Label), size = 2) +
       scale_color_manual(values = timeline_colors) + 
       scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
-      scale_y_continuous(labels = label_dollar(), limits = c(500000, 800000)) +
+      scale_y_continuous(labels = label_dollar(), limits = c(0, NA)) +
       labs(x = "Years from First Retraction", y = "Average Funding ($)") +
       dashboard_theme + theme(legend.position = "none")
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
   })
   
+  output$plot_avg_funding_note <- renderUI({
+    fa <- filtered_authors()
+    total_authors <- n_distinct(fa$Original_Author_Name)
+    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: The average is calculated taking into account every unique retracted author (", comma(total_authors), "). Authors receiving no funding in a given year are counted as $0, reflecting the formula: Average Funding (Year X) = Total Funding (Year X) / Total Unique Retracted Authors. To find the funding granted to retracted authors in the NIH RePORTER system, we used strict name matching (requiring an exact match of first, middle, and last names). This approach minimizes the possibility of false positives, but if an author was not found due to a name variation, they are treated as having $0 funding, making this a conservative estimate of the financial impact.</p>"))
+  })
+  
   # --- Statistical tests ---
   paired_data <- reactive({
-    df_authors %>% filter(diff_retracted >= -3 & diff_retracted <= 3 & diff_retracted != 0) %>%
+    filtered_authors() %>% filter(diff_retracted >= -3 & diff_retracted <= 3 & diff_retracted != 0) %>%
       mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>% group_by(Original_Author_Name, Period) %>%
       summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE) / 3, Total_Grants = n_distinct(Grant_ID), .groups = "drop") %>%
       pivot_wider(names_from = Period, values_from = c(Annual_Funding, Total_Grants), values_fill = list(Annual_Funding = 0, Total_Grants = 0))
   })
   
-  # --- Individual Impact Calculations ---
-  individual_impact <- reactive({
-    paired_data() %>%
-      mutate(
-        Funding_Difference = Annual_Funding_Post - Annual_Funding_Pre,
-        Percent_Change = case_when(
-          Annual_Funding_Pre == 0 & Annual_Funding_Post == 0 ~ 0,
-          Annual_Funding_Pre == 0 & Annual_Funding_Post > 0 ~ 999, 
-          TRUE ~ (Annual_Funding_Post - Annual_Funding_Pre) / Annual_Funding_Pre * 100
-        )
-      )
-  })
-  
-  output$plot_impact_dist <- renderPlotly({
-    # FILTRO: Mostrar SÓLO a los autores que tenían fondos antes de la retracción.
-    df <- individual_impact() %>%
-      filter(Annual_Funding_Pre > 0) %>%
-      # CAPPING: Todo aumento superior al 200% se agrupa en el límite visual para evitar distorsión
-      mutate(Plot_Pct = ifelse(Percent_Change > 200, 200, Percent_Change))
-    
-    p <- ggplot(df, aes(x = Plot_Pct)) +
-      geom_histogram(binwidth = 10, fill = "#005b96", color = "white", boundary = 0) +
-      geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 1) +
-      scale_x_continuous(
-        breaks = seq(-100, 200, by = 50),
-        labels = function(x) ifelse(x == 200, "\u2265+200%", paste0(x, "%"))
-      ) +
-      coord_cartesian(xlim = c(-100, 210)) +
-      labs(x = "Percentage Change in Funding (Pre vs Post)", y = "Number of Authors") +
-      dashboard_theme +
-      theme(panel.grid.major.x = element_blank())
-    
-    ggplotly(p) %>% 
-      layout(margin = list(t = 30))
-  })
-  
-  output$table_top_affected <- renderDT({
-    df <- individual_impact() %>%
-      filter(Funding_Difference < 0) %>% 
-      arrange(Funding_Difference) %>%
-      slice_head(n = 10) %>%
-      mutate(
-        Author = Original_Author_Name, 
-        `Pre-Retraction` = dollar(Annual_Funding_Pre, accuracy = 1),
-        `Post-Retraction` = dollar(Annual_Funding_Post, accuracy = 1),
-        `Difference` = dollar(Funding_Difference, accuracy = 1)
-      ) %>%
-      select(Author, `Pre-Retraction`, `Post-Retraction`, `Difference`)
-    
-    datatable(df,
-              class = 'row-border stripe',
-              selection = 'none',
-              options = list(dom = 't', ordering = FALSE, paging = FALSE),
-              rownames = FALSE)
-  })
+
   
   # --- ESTADÍSTICAS GLOBALES PARA LA FILA SUPERIOR ---
   output$stats_avg_funding <- renderUI({
     tl <- df_timeline()
     mean_pre <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
     mean_post <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+    mean_total_pre <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    mean_total_post <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
     pct_change <- (mean_post - mean_pre) / mean_pre * 100
     
     # Test estadístico basado en todos los autores
@@ -677,10 +630,16 @@ server <- function(input, output, session) {
     
     # Cálculos para la transición de autores
     total_authors <- n_distinct(df_authors$Original_Author_Name)
+    active_authors_pre <- sum(pd$Annual_Funding_Pre > 0, na.rm = TRUE)
+    active_authors_post <- sum(pd$Annual_Funding_Post > 0, na.rm = TRUE)
     lost_all_n <- sum(pd$Annual_Funding_Pre > 0 & pd$Annual_Funding_Post == 0, na.rm = TRUE)
     gained_n   <- sum(pd$Annual_Funding_Pre == 0 & pd$Annual_Funding_Post > 0, na.rm = TRUE)
     lost_all_pct <- (lost_all_n / total_authors) * 100
     gained_pct   <- (gained_n / total_authors) * 100
+    
+    both_funded_n  <- sum(pd$Annual_Funding_Pre > 0 & pd$Annual_Funding_Post > 0, na.rm = TRUE)
+    # never_funded_n computed using sets to capture authors who might be entirely missing from pd
+    never_funded_n <- total_authors - (active_authors_pre + active_authors_post - both_funded_n)
     
     HTML(paste0(
       "<div style='padding: 10px;'>",
@@ -717,20 +676,21 @@ server <- function(input, output, session) {
       "</div>",
       
       "<div style='background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef;'>",
-      "<div style='font-size: 12px; font-weight: bold; color: #333; margin-bottom: 5px;'><i class='fa fa-flask'></i> WILCOXON SIGNED-RANK TEST (PAIRED)</div>",
-      "<div style='font-size: 11px; color: #777; margin-bottom: 8px;'>Based on average funding per author across entire cohort</div>",
-      "<div style='font-size: 14px;'><strong>p-value:</strong> <span style='font-family: monospace; background: #fff; padding: 2px 5px; border-radius: 3px; border: 1px solid #ddd;'>", format(test_funding$p.value, scientific = TRUE, digits = 4), "</span></div>",
+      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction. The mean total annual funding granted to these authors was ", dollar(mean_total_pre, accuracy = 1), " and ", dollar(mean_total_post, accuracy = 1), " in the pre- and post-retraction periods, respectively.</div>",
       "</div>",
       "</div>"
     ))
   })
   
-  output$stats_cohort_authors <- renderUI({
+  output$stats_active_grants <- renderUI({
     tl <- df_timeline()
-    mean_pre <- mean(tl$Cohort_Authors[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
-    mean_post <- mean(tl$Cohort_Authors[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
-    pct_change <- 0 
-    pct_color <- "#777" 
+    mean_pre <- mean(tl$Active_Grants[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    mean_post <- mean(tl$Active_Grants[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+    pct_change <- (mean_post - mean_pre) / mean_pre * 100
+    pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c") 
+    
+    pd <- paired_data()
+    test_grants <- wilcox.test(pd$Total_Grants_Pre, pd$Total_Grants_Post, paired = TRUE, exact = FALSE)
     
     HTML(paste0(
       "<div style='padding: 10px;'>",
@@ -738,20 +698,18 @@ server <- function(input, output, session) {
       "<div style='display: flex; justify-content: space-between; margin-bottom: 20px;'>",
       "<div style='text-align: center; width: 48%;'>",
       "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Pre-Retraction</div>",
-      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", comma(mean_pre), "</div>",
+      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", comma(round(mean_pre, 1)), "</div>",
       "</div>",
       "<div style='text-align: center; width: 48%; border-left: 1px solid #eee;'>",
       "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Post-Retraction</div>",
-      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", comma(mean_post), "</div>",
+      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", comma(round(mean_post, 1)), "</div>",
       "</div>",
       "</div>",
       "<div style='text-align: center; margin-bottom: 25px;'>",
       "<span style='font-size: 14px; color: #666; text-transform: uppercase; font-weight: bold;'>Change: </span>",
-      "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>0.0%</span>",
-      "</div>",
-      "<div style='background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef;'>",
-      "<div style='font-size: 12px; font-weight: bold; color: #333; margin-bottom: 5px;'><i class='fa fa-info-circle'></i> COHORT SIZE</div>",
-      "<div style='font-size: 11px; color: #777; margin-bottom: 8px;'>The total number of retracted authors analyzed remains constant across all years. Authors receiving $0 are included.</div>",
+      "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>",
+      sprintf("%+.1f%%", pct_change),
+      "</span>",
       "</div>",
       "</div>"
     ))
@@ -784,59 +742,11 @@ server <- function(input, output, session) {
       sprintf("%+.1f%%", pct_change),
       "</span>",
       "</div>",
-      "<div style='background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef;'>",
-      "<div style='font-size: 12px; font-weight: bold; color: #333; margin-bottom: 5px;'><i class='fa fa-flask'></i> WILCOXON SIGNED-RANK TEST (PAIRED)</div>",
-      "<div style='font-size: 11px; color: #777; margin-bottom: 8px;'>Based on annual funding per author</div>",
-      "<div style='font-size: 14px;'><strong>p-value:</strong> <span style='font-family: monospace; background: #fff; padding: 2px 5px; border-radius: 3px; border: 1px solid #ddd;'>", format(test_funding$p.value, scientific = TRUE, digits = 4), "</span></div>",
-      "</div>",
       "</div>"
     ))
   })
   
-  # --- NUEVA CAJA: ESTADÍSTICAS SÓLO PARA AUTORES CON FONDOS (AL LADO DEL HISTOGRAMA) ---
-  output$stats_funded_only <- renderUI({
-    # FILTRO APLICADO AQUÍ: Solo para autores previamente financiados
-    funded_authors <- paired_data() %>% 
-      filter(Annual_Funding_Pre > 0)
-    
-    mean_pre <- mean(funded_authors$Annual_Funding_Pre, na.rm = TRUE)
-    mean_post <- mean(funded_authors$Annual_Funding_Post, na.rm = TRUE)
-    pct_change <- (mean_post - mean_pre) / mean_pre * 100
-    
-    test_funding <- wilcox.test(funded_authors$Annual_Funding_Pre, 
-                                funded_authors$Annual_Funding_Post, 
-                                paired = TRUE, exact = FALSE)
-    
-    pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c") 
-    
-    HTML(paste0(
-      "<div style='padding: 5px;'>",
-      "<div style='margin-bottom: 15px;'>",
-      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Pre-Retraction</div>",
-      "<div style='font-size: 20px; font-weight: bold; color: #333;'>", dollar(mean_pre, accuracy = 1), "</div>",
-      "</div>",
-      
-      "<div style='margin-bottom: 15px;'>",
-      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Post-Retraction</div>",
-      "<div style='font-size: 20px; font-weight: bold; color: #333;'>", dollar(mean_post, accuracy = 1), "</div>",
-      "</div>",
-      
-      "<div style='margin-bottom: 20px;'>",
-      "<span style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Change: </span>",
-      "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>",
-      sprintf("%+.1f%%", pct_change),
-      "</span>",
-      "</div>",
-      
-      "<hr style='margin-top: 10px; margin-bottom: 10px; border-top: 1px solid #eee;'>",
-      
-      "<div style='font-size: 11px; color: #777;'>",
-      "<strong>p-value:</strong> <span style='font-family: monospace; background: #f8f9fa; padding: 2px 4px; border-radius: 3px; border: 1px solid #ddd;'>", format(test_funding$p.value, scientific = TRUE, digits = 4), "</span><br>",
-      "<span style='font-size: 10px;'>(Wilcoxon Signed-Rank Test)</span>",
-      "</div>",
-      "</div>"
-    ))
-  })
+
   
 }
 

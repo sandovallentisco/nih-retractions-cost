@@ -76,7 +76,7 @@ def run_pipeline() -> None:
             # --------------------------------------------------------------
             # Fast path: cache hit. No network call, no sleep.
             # --------------------------------------------------------------
-            cached = cache.get(doi, provided_pmid)
+            cached = cache.get(None, provided_pmid)
             if cached is not None:
                 us_studies.at[index, "PubMed_ID"] = cached["PubMed_ID"]
                 us_studies.at[index, "Study_Design"] = cached["Study_Design"]
@@ -88,11 +88,11 @@ def run_pipeline() -> None:
             # Slow path: query PubMed and update both the dataframe and
             # the cache.
             # --------------------------------------------------------------
-            pmid, design, fund_list = get_pubmed_metadata(doi, provided_pmid)
+            pmid, design, fund_list = get_pubmed_metadata(provided_pmid)
             funding_str = _format_funding(fund_list)
 
             tqdm.write(
-                f"Retrieved -> DOI: {doi} | PMID: {pmid} | "
+                f"Retrieved -> PMID: {pmid} | "
                 f"Info: {str(design)[:40]}... | Funding: {funding_str[:40]}..."
             )
 
@@ -102,7 +102,7 @@ def run_pipeline() -> None:
 
             # The cache layer transparently rejects transient errors so we
             # do not pollute the cache with failures that should be retried.
-            cache.put(doi, provided_pmid, pmid, design, funding_str)
+            cache.put(None, provided_pmid, pmid, design, funding_str)
             n_misses += 1
 
             cache.maybe_autosave(every=AUTOSAVE_EVERY)

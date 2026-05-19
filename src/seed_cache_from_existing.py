@@ -115,7 +115,7 @@ def seed_cache(input_csv: Path = INPUT_CSV,
         design = row.get("Study_Design", "")
         funding = row.get("Funding_Info", "")
 
-        if make_cache_key(doi, pmid_in) is None:
+        if make_cache_key(None, pmid_in) is None:
             n_no_key += 1
             continue
 
@@ -123,7 +123,7 @@ def seed_cache(input_csv: Path = INPUT_CSV,
             n_skipped += 1
             continue
 
-        cache.put(doi, pmid_in, resolved_pmid, design, funding)
+        cache.put(None, pmid_in, resolved_pmid, design, funding)
         n_seeded += 1
 
     cache.save()
