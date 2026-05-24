@@ -276,6 +276,14 @@ ui <- navbarPage(
                column(6, div(class = "nih-card",
                              h4("Active Grants Statistics"),
                              withSpinner(uiOutput("stats_active_grants"), type = 4, color = "#17a2b8")))
+             ),
+             fluidRow(
+               column(6, div(class = "nih-card",
+                             h4("Percent Change in Average Funding (Pre vs. Post Retraction)"),
+                             withSpinner(plotlyOutput("plot_dumbbell_funding", height = "400px"), type = 4, color = "#17a2b8"))),
+               column(6, div(class = "nih-card",
+                             h4("Distribution of Individual % Change"),
+                             withSpinner(plotlyOutput("plot_pct_change_dist", height = "400px"), type = 4, color = "#17a2b8")))
              )
            )
   )
@@ -330,6 +338,7 @@ server <- function(input, output, session) {
       ggplot(aes(x = `Publication Year`, y = `No. of articles`, fill = `Funding Status`)) +
       geom_col(width = 1, color = "white", position = "stack") +
       scale_fill_manual(values = corporate_colors) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Publication Year", y = "No. of articles") + dashboard_theme
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
   })
@@ -342,6 +351,7 @@ server <- function(input, output, session) {
       ggplot(aes(x = `Retraction Year`, y = `No. of articles`, fill = `Funding Status`)) +
       geom_col(width = 1, color = "white", position = "stack") +
       scale_fill_manual(values = corporate_colors) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Retraction Year", y = "No. of articles") + dashboard_theme
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
   })
@@ -372,6 +382,7 @@ server <- function(input, output, session) {
       geom_col(width = 1, color = "white", position = "stack") +
       scale_fill_manual(values = corporate_colors) +
       coord_cartesian(xlim = c(0, LAG_AXIS_MAX)) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Years between Publication and Retraction", y = "No. of articles") +
       dashboard_theme
     ggplotly(p, tooltip = c("x", "y", "fill")) %>%
@@ -453,7 +464,7 @@ server <- function(input, output, session) {
       count(`Publisher Group`, `Funding Status`, name = "No. of articles") %>%
       ggplot(aes(y = `Publisher Group`, x = `No. of articles`, fill = `Funding Status`)) +
       geom_col(color = "white", position = "stack", width = 0.8) +
-      scale_x_continuous(expand = expansion(mult = c(0.02, 0.05))) +
+      scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
       scale_fill_manual(values = corporate_colors) +
       labs(y = "", x = "No. of articles") +
       dashboard_theme +
@@ -503,7 +514,7 @@ server <- function(input, output, session) {
       rename(`Domain Full` = Domain_Full, `Funding Status` = Funding_Status) %>%
       count(`Domain Full`, `Funding Status`, name = "No. of articles") %>%
       ggplot(aes(x = `Domain Full`, y = `No. of articles`, fill = `Funding Status`)) + geom_col(color = "white", position = "stack") + coord_flip() +
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme +
+      scale_fill_manual(values = corporate_colors) + scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + labs(x = "", y = "No. of articles") + dashboard_theme +
       theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5))
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
@@ -521,7 +532,7 @@ server <- function(input, output, session) {
       rename(`Funding Status` = Funding_Status) %>%
       count(Reason, `Funding Status`, name = "No. of articles") %>%
       ggplot(aes(x = Reason, y = `No. of articles`, fill = `Funding Status`)) + geom_col(color = "white", position = "stack") + coord_flip() +
-      scale_fill_manual(values = corporate_colors) + labs(x = "", y = "No. of articles") + dashboard_theme +
+      scale_fill_manual(values = corporate_colors) + scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + labs(x = "", y = "No. of articles") + dashboard_theme +
       theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5))
     
     ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
@@ -598,6 +609,65 @@ server <- function(input, output, session) {
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
   })
   
+  output$plot_dumbbell_funding <- renderPlotly({
+    pd <- paired_data()
+    tl <- df_timeline()
+    
+    # Calculate means exactly as in stats_avg_funding to match the global statistics
+    mean_pre <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    mean_post <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+    pct_change <- (mean_post - mean_pre) / mean_pre
+    if (is.nan(pct_change) | is.infinite(pct_change)) pct_change <- 0
+    
+    # Random sample for interactive Plotly to prevent browser crash
+    set.seed(42)
+    pd_sample <- pd %>% 
+      sample_n(min(300, n())) %>%
+      mutate(Indiv_Pct_Change = ifelse(Annual_Funding_Pre > 0, 
+                                       (Annual_Funding_Post - Annual_Funding_Pre) / Annual_Funding_Pre, 
+                                       ifelse(Annual_Funding_Post > 0, 1, 0))) %>%
+      mutate(Indiv_Pct_Change_Capped = pmax(pmin(Indiv_Pct_Change, 3), -1))
+    
+    # Long format for spaghetti
+    df_long <- pd_sample %>%
+      select(Original_Author_Name, `Pre-Retraction` = Annual_Funding_Pre, `Post-Retraction` = Annual_Funding_Post, Indiv_Pct_Change_Capped, Indiv_Pct_Change) %>%
+      pivot_longer(cols = c(`Pre-Retraction`, `Post-Retraction`), names_to = "Period", values_to = "Funding") %>%
+      mutate(Period = factor(Period, levels = c("Pre-Retraction", "Post-Retraction")))
+      
+    # Mean format
+    df_mean <- data.frame(
+      Period = factor(c("Pre-Retraction", "Post-Retraction"), levels = c("Pre-Retraction", "Post-Retraction")),
+      Funding = c(mean_pre, mean_post)
+    )
+    
+    col_mean <- ifelse(mean_post < mean_pre, "#d9534f", "#005b96")
+    
+    p <- ggplot() +
+      geom_line(data = df_long, aes(x = Period, y = Funding, group = Original_Author_Name, color = Indiv_Pct_Change_Capped,
+                                    text = paste("Author:", Original_Author_Name, "<br>Period:", Period, "<br>Funding:", dollar(Funding), "<br>Change:", percent(Indiv_Pct_Change, accuracy = 0.1))), 
+                alpha = 0.5, linewidth = 0.5) +
+      scale_color_gradientn(colors = c("blue", "yellow", "red"),
+                            values = scales::rescale(c(-1, 0, 3), from = c(-1, 3)),
+                            limits = c(-1, 3),
+                            labels = percent, name = "% Change") +
+      geom_line(data = df_mean, aes(x = Period, y = Funding, group = 1), 
+                color = "black", linewidth = 3) +
+      geom_line(data = df_mean, aes(x = Period, y = Funding, group = 1), 
+                color = col_mean, linewidth = 1.5) +
+      geom_point(data = df_mean, aes(x = Period, y = Funding, 
+                                     text = paste("Mean", Period, ":", dollar(Funding))), 
+                 color = col_mean, size = 4) +
+      scale_y_continuous(labels = label_dollar(), limits = c(0, NA)) +
+      labs(x = "", y = "Average Annual Funding ($)") +
+      dashboard_theme +
+      theme(
+        panel.grid.major.x = element_blank(),
+        legend.position = "right"
+      )
+      
+    ggplotly(p, tooltip = "text") %>% layout(margin = list(b = 40, t = 40, l = 10, r = 10))
+  })
+  
   output$plot_avg_funding_note <- renderUI({
     fa <- filtered_authors()
     total_authors <- n_distinct(fa$Original_Author_Name)
@@ -610,6 +680,21 @@ server <- function(input, output, session) {
       mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>% group_by(Original_Author_Name, Period) %>%
       summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE) / 3, Total_Grants = n_distinct(Grant_ID), .groups = "drop") %>%
       pivot_wider(names_from = Period, values_from = c(Annual_Funding, Total_Grants), values_fill = list(Annual_Funding = 0, Total_Grants = 0))
+  })
+  
+  output$plot_pct_change_dist <- renderPlotly({
+    pd <- paired_data()
+    pd <- pd %>% filter(Annual_Funding_Pre > 0) %>%
+      mutate(Pct_Change = (Annual_Funding_Post - Annual_Funding_Pre) / Annual_Funding_Pre) %>%
+      mutate(Pct_Change_Capped = ifelse(Pct_Change > 5, 5, Pct_Change))
+    
+    p <- ggplot(pd, aes(x = Pct_Change_Capped)) +
+      geom_histogram(fill = "#005b96", color = "white", bins = 40) +
+      scale_x_continuous(labels = percent) +
+      labs(x = "Individual % Change (Capped at +500%)", y = "No. of Authors") +
+      dashboard_theme + theme(axis.title.y = element_blank())
+      
+    ggplotly(p) %>% layout(margin = list(b = 40, t = 40, l = 10, r = 10))
   })
   
 
