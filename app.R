@@ -65,6 +65,9 @@ df_papers <- read_csv(papers_file, show_col_types = FALSE) %>%
     Publication_Year = as.numeric(str_extract(OriginalPaperDate, "(?<=/)\\d{4}")),
     Retraction_Year  = as.numeric(str_extract(RetractionDate,    "(?<=/)\\d{4}")),
     retraction_lag   = Retraction_Year - Publication_Year,
+    # Single source of truth: a paper is "NIH Funded" if it has any positive NIH funding.
+    Funding_Status   = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
+                              "NIH Funded", "Not NIH Funded / Other"),
     attributed_cost_raw = ifelse(
       !is.na(Total_Grant_Pubs) & Total_Grant_Pubs > 0,
       Total_NIH_Funding_Cost / Total_Grant_Pubs,
@@ -73,6 +76,14 @@ df_papers <- read_csv(papers_file, show_col_types = FALSE) %>%
   ) %>%
   left_join(annual_cpi, by = c("Publication_Year" = "Fiscal_Year")) %>%
   mutate(attributed_cost_adjusted = attributed_cost_raw * Inflation_Multiplier)
+
+# Helper: data-driven y-axis limits with a 15% margin (matches preprint Figure 2)
+add_margin <- function(v, pad = 0.15) {
+  r <- range(v, na.rm = TRUE)
+  d <- diff(r)
+  if (!is.finite(d) || d == 0) d <- max(abs(r[1]), 1) * 0.1
+  c(r[1] - d * pad, r[2] + d * pad)
+}
 
 # --- LOAD AUTHORS ---
 df_authors_raw <- read_csv(authors_file, show_col_types = FALSE)
@@ -86,10 +97,19 @@ df_authors <- df_authors_raw %>%
   mutate(First_Retraction_Year = min(Retraction_Year, na.rm = TRUE)) %>%
   ungroup() %>%
   mutate(diff_retracted = Fiscal_Year - First_Retraction_Year) %>%
-  distinct(Original_Author_Name, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
+  distinct(Original_Author_Name, First_Retraction_Year, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
   left_join(annual_cpi, by = "Fiscal_Year") %>%
   mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier) %>%
   left_join(author_retractions, by = "Original_Author_Name")
+
+# Restrict the author-consequences cohort to authors whose first retraction is early
+# enough that a full +3-year post-retraction window is observable given the latest
+# fiscal year available in RePORTER. Without this restriction, authors retracted in
+# the last 3 years contribute $0 to post-retraction offsets for years that have not
+# yet happened, artificially inflating the apparent funding drop.
+latest_fiscal_year     <- max(df_authors$Fiscal_Year, na.rm = TRUE)
+retraction_cutoff_year <- latest_fiscal_year - 3
+df_authors <- df_authors %>% filter(First_Retraction_Year <= retraction_cutoff_year)
 
 # --- GLOBAL PLOT THEME ---
 # Transparent backgrounds so plots blend with the dashboard cards.
@@ -253,7 +273,7 @@ ui <- navbarPage(
            fluidPage(
              br(),
              fluidRow(
-               column(8, p(strong("Note:"), " The charts below show CPI-adjusted NIH funding and activity for authors who had a paper retracted. Data is grouped by year offset relative to each author's first retraction (year 0). ",
+               column(8, p(HTML(paste0(strong("Note:"), " The charts below show CPI-adjusted NIH funding and activity for authors who had a paper retracted. Data is grouped by year offset relative to each author's first retraction (year 0). The cohort is restricted to authors whose first retraction occurred by ", retraction_cutoff_year, " so that a full 3-year post-retraction window of funding data is observable for every author given the most recent RePORTER fiscal year (", latest_fiscal_year, ").")),
                             style = "color: gray; font-style: italic; margin-bottom: 20px;")),
                column(4, selectInput("author_cohort_filter", HTML("<span style='white-space: nowrap;'>Sensitivity Analysis (Retracted Papers per Author):</span>"), 
                                      choices = c("All Authors" = "all", "1 Paper Retracted" = "one", ">1 Papers Retracted" = "more"),
@@ -261,11 +281,11 @@ ui <- navbarPage(
              ),
              fluidRow(
                column(6, div(class = "nih-card",
-                             h4("Average Funding Granted to Retracted Authors"), # TITULO MODIFICADO
+                             h4("Average Funding Granted to Retracted Authors"),
                              withSpinner(plotlyOutput("plot_avg_funding"), type = 4, color = "#17a2b8"),
                              uiOutput("plot_avg_funding_note"))),
                column(6, div(class = "nih-card",
-                             h4("Average Funding Statistics"), # TITULO MODIFICADO
+                             h4("Average Funding Statistics"),
                              withSpinner(uiOutput("stats_avg_funding"), type = 4, color = "#17a2b8")))
              ),
              fluidRow(
@@ -296,7 +316,7 @@ server <- function(input, output, session) {
   # --- KPI tiles ---
   output$kpi_papers <- renderText({ comma(nrow(df_papers)) })
   output$kpi_funding <- renderText({ dollar(sum(df_papers$attributed_cost_adjusted, na.rm = TRUE), accuracy = 1) })
-  output$kpi_nih_papers <- renderText({ comma(sum(!is.na(df_papers$attributed_cost_raw))) })
+  output$kpi_nih_papers <- renderText({ comma(sum(df_papers$Funding_Status == "NIH Funded")) })
   
   # --- Summary table ---
   output$cost_summary_table <- renderDT({
@@ -332,7 +352,6 @@ server <- function(input, output, session) {
   # --- Paper-level plots (Plotly) ---
   output$plot_pub_year <- renderPlotly({
     p <- df_papers %>% drop_na(Publication_Year) %>% filter(Publication_Year >= 1970) %>%
-      mutate(Funding_Status = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0, "NIH Funded", "Not NIH Funded / Other")) %>%
       rename(`Publication Year` = Publication_Year, `Funding Status` = Funding_Status) %>%
       count(`Publication Year`, `Funding Status`, name = "No. of articles") %>%
       ggplot(aes(x = `Publication Year`, y = `No. of articles`, fill = `Funding Status`)) +
@@ -345,7 +364,6 @@ server <- function(input, output, session) {
   
   output$plot_ret_year <- renderPlotly({
     p <- df_papers %>% drop_na(Retraction_Year) %>% filter(Retraction_Year >= 1970) %>%
-      mutate(Funding_Status = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0, "NIH Funded", "Not NIH Funded / Other")) %>%
       rename(`Retraction Year` = Retraction_Year, `Funding Status` = Funding_Status) %>%
       count(`Retraction Year`, `Funding Status`, name = "No. of articles") %>%
       ggplot(aes(x = `Retraction Year`, y = `No. of articles`, fill = `Funding Status`)) +
@@ -360,15 +378,10 @@ server <- function(input, output, session) {
   LAG_AXIS_MAX <- 25
   
   lag_diagnostics <- reactive({
-    full <- df_papers %>%
-      mutate(Funding_Status = ifelse(
-        !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
-        "NIH Funded", "Not NIH Funded / Other"
-      ))
-    n_total    <- nrow(full)
-    n_missing  <- sum(is.na(full$retraction_lag))
-    n_negative <- sum(full$retraction_lag < 0, na.rm = TRUE)
-    valid      <- full %>% filter(!is.na(retraction_lag) & retraction_lag >= 0)
+    n_total    <- nrow(df_papers)
+    n_missing  <- sum(is.na(df_papers$retraction_lag))
+    n_negative <- sum(df_papers$retraction_lag < 0, na.rm = TRUE)
+    valid      <- df_papers %>% filter(!is.na(retraction_lag) & retraction_lag >= 0)
     n_outliers <- sum(valid$retraction_lag > LAG_AXIS_MAX, na.rm = TRUE)
     list(total = n_total, missing = n_missing, negative = n_negative, outliers = n_outliers, valid = valid)
   })
@@ -431,10 +444,6 @@ server <- function(input, output, session) {
       mutate(Publisher = str_trim(Publisher)) %>%
       filter(Publisher != "") %>%
       mutate(
-        Funding_Status = ifelse(
-          !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
-          "NIH Funded", "Not NIH Funded / Other"
-        ),
         Publisher_Group = case_when(
           str_detect(Publisher, "(?i)Hindawi")                                         ~ "Hindawi (Wiley)",
           str_detect(Publisher, "(?i)Springer|Nature|BioMed Central|BMC|Palgrave")     ~ "Springer Nature",
@@ -486,10 +495,6 @@ server <- function(input, output, session) {
       mutate(Subject = str_trim(Subject)) %>%
       filter(Subject != "") %>%
       mutate(
-        Funding_Status = ifelse(
-          !is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
-          "NIH Funded", "Not NIH Funded / Other"
-        ),
         Acronym = str_extract(Subject, "^\\([^)]+\\)")
       ) %>%
       mutate(
@@ -523,7 +528,6 @@ server <- function(input, output, session) {
   output$plot_reasons <- renderPlotly({
     reasons_data <- df_papers %>% drop_na(Reason) %>% mutate(Paper_ID = row_number()) %>% separate_rows(Reason, sep = ";") %>%
       mutate(Reason = str_trim(Reason)) %>% filter(Reason != "", !str_detect(Reason, "^Investigation")) %>%
-      mutate(Funding_Status = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0, "NIH Funded", "Not NIH Funded / Other")) %>%
       distinct(Paper_ID, Reason, Funding_Status)
     
     top_10 <- reasons_data %>% count(Reason, sort = TRUE) %>% slice_head(n = 10) %>% pull(Reason)
@@ -554,13 +558,27 @@ server <- function(input, output, session) {
   df_timeline <- reactive({
     fa <- filtered_authors()
     total_cohort_authors <- n_distinct(fa$Original_Author_Name)
-    
+
+    # Per-author per-year funding (used to count how many authors have any grant per year)
+    per_author_year <- fa %>%
+      filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+      group_by(Original_Author_Name, diff_retracted) %>%
+      summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE), .groups = "drop")
+
     fa %>% filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
       group_by(diff_retracted) %>%
       summarise(Total_Adjusted_Funding = sum(Funding_Adjusted, na.rm = TRUE),
-                Active_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)])) %>%
+                Active_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)]),
+                .groups = "drop") %>%
+      left_join(
+        per_author_year %>%
+          group_by(diff_retracted) %>%
+          summarise(N_Funded = sum(Annual_Funding > 0), .groups = "drop"),
+        by = "diff_retracted"
+      ) %>%
       mutate(Cohort_Authors = total_cohort_authors,
              Average_Funding_Per_Author = Total_Adjusted_Funding / total_cohort_authors,
+             Pct_With_Funding = N_Funded / total_cohort_authors * 100,
              Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"))
   })
   
@@ -573,38 +591,25 @@ server <- function(input, output, session) {
       geom_line(color = "#005b96", linewidth = 0.5, group = 1) +
       geom_point(aes(color = Period_Label), size = 2) +
       scale_color_manual(values = timeline_colors) +
-      scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
-      scale_y_continuous(labels = comma, limits = c(0, NA)) +
+      scale_x_continuous(breaks = -3:3) +
+      scale_y_continuous(labels = comma, limits = add_margin(tl$Active_Grants)) +
       labs(x = "Years from First Retraction", y = "Total Active Grants") +
       dashboard_theme + theme(legend.position = "none")
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
   })
-  
-  output$plot_total_funding <- renderPlotly({
+
+  output$plot_avg_funding <- renderPlotly({
     tl <- df_timeline()
-    p <- ggplot(tl, aes(x = diff_retracted, y = Total_Adjusted_Funding, text = paste("Year offset:", diff_retracted, "<br>Total Funding:", dollar(Total_Adjusted_Funding)))) +
+    p <- ggplot(tl, aes(x = diff_retracted, y = Average_Funding_Per_Author,
+                        text = paste("Year offset:", diff_retracted,
+                                     "<br>Average funding:", dollar(Average_Funding_Per_Author)))) +
       geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8) +
       geom_line(color = "#005b96", linewidth = 0.5, group = 1) +
       geom_point(aes(color = Period_Label), size = 2) +
       scale_color_manual(values = timeline_colors) +
-      scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
-      scale_y_continuous(labels = label_dollar()) +
-      labs(x = "Years from First Retraction", y = "Total CPI-adjusted Funding ($)") +
-      dashboard_theme + theme(legend.position = "none")
-    ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
-  })
-  
-  output$plot_avg_funding <- renderPlotly({
-    tl <- df_timeline()
-    p <- ggplot(tl, aes(x = diff_retracted, y = Average_Funding_Per_Author, 
-                        text = paste("Year offset:", diff_retracted, "<br>Average Funding:", dollar(Average_Funding_Per_Author)))) +
-      geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8) +
-      geom_line(color = "#005b96", linewidth = 0.5, group = 1) +
-      geom_point(aes(color = Period_Label), size = 2) +
-      scale_color_manual(values = timeline_colors) + 
-      scale_x_continuous(breaks = seq(-3, 3, by = 1)) +
-      scale_y_continuous(labels = label_dollar(), limits = c(0, NA)) +
-      labs(x = "Years from First Retraction", y = "Average Funding ($)") +
+      scale_x_continuous(breaks = -3:3) +
+      scale_y_continuous(labels = label_dollar(), limits = add_margin(tl$Average_Funding_Per_Author)) +
+      labs(x = "Years from First Retraction", y = "Average CPI-adjusted Funding ($)") +
       dashboard_theme + theme(legend.position = "none")
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
   })
@@ -678,7 +683,8 @@ server <- function(input, output, session) {
   paired_data <- reactive({
     filtered_authors() %>% filter(diff_retracted >= -3 & diff_retracted <= 3 & diff_retracted != 0) %>%
       mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>% group_by(Original_Author_Name, Period) %>%
-      summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE) / 3, Total_Grants = n_distinct(Grant_ID), .groups = "drop") %>%
+      summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE) / 3,
+                Total_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)]), .groups = "drop") %>%
       pivot_wider(names_from = Period, values_from = c(Annual_Funding, Total_Grants), values_fill = list(Annual_Funding = 0, Total_Grants = 0))
   })
   
@@ -702,33 +708,35 @@ server <- function(input, output, session) {
   # --- ESTADÍSTICAS GLOBALES PARA LA FILA SUPERIOR ---
   output$stats_avg_funding <- renderUI({
     tl <- df_timeline()
-    mean_pre <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    mean_pre  <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
     mean_post <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
-    mean_total_pre <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
-    mean_total_post <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
-    pct_change <- (mean_post - mean_pre) / mean_pre * 100
-    
-    # Test estadístico basado en todos los autores
+    pct_change <- if (mean_pre > 0) (mean_post - mean_pre) / mean_pre * 100 else NA_real_
+
+    pct_funded_pre  <- mean(tl$Pct_With_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    pct_funded_post <- mean(tl$Pct_With_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+    pct_funded_change <- pct_funded_post - pct_funded_pre
+
+    # Aggregate annual funding flowing to the cohort, averaged across each 3-year window
+    total_funding_pre  <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    total_funding_post <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+
+    pct_color <- ifelse(is.na(pct_change) || pct_change >= 0, "#5cb85c", "#d9534f")
+
+    # Denominator must respect the current sensitivity filter so percentages match the cohort shown above
     pd <- paired_data()
-    test_funding <- wilcox.test(pd$Annual_Funding_Pre, pd$Annual_Funding_Post, paired = TRUE, exact = FALSE)
-    pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c") 
-    
-    # Cálculos para la transición de autores
-    total_authors <- n_distinct(df_authors$Original_Author_Name)
-    active_authors_pre <- sum(pd$Annual_Funding_Pre > 0, na.rm = TRUE)
+    total_authors <- n_distinct(filtered_authors()$Original_Author_Name)
+    active_authors_pre  <- sum(pd$Annual_Funding_Pre  > 0, na.rm = TRUE)
     active_authors_post <- sum(pd$Annual_Funding_Post > 0, na.rm = TRUE)
     lost_all_n <- sum(pd$Annual_Funding_Pre > 0 & pd$Annual_Funding_Post == 0, na.rm = TRUE)
     gained_n   <- sum(pd$Annual_Funding_Pre == 0 & pd$Annual_Funding_Post > 0, na.rm = TRUE)
     lost_all_pct <- (lost_all_n / total_authors) * 100
-    gained_pct   <- (gained_n / total_authors) * 100
-    
-    both_funded_n  <- sum(pd$Annual_Funding_Pre > 0 & pd$Annual_Funding_Post > 0, na.rm = TRUE)
-    # never_funded_n computed using sets to capture authors who might be entirely missing from pd
-    never_funded_n <- total_authors - (active_authors_pre + active_authors_post - both_funded_n)
-    
+    gained_pct   <- (gained_n   / total_authors) * 100
+
+    pct_change_txt <- if (is.na(pct_change)) "n/a" else sprintf("%+.1f%%", pct_change)
+
     HTML(paste0(
       "<div style='padding: 10px;'>",
-      "<h5 style='color: #005b96; font-weight: bold; margin-bottom: 20px; text-transform: uppercase;'>3 Years Pre vs Post Retraction</h5>",
+      "<h5 style='color: #005b96; font-weight: bold; margin-bottom: 20px; text-transform: uppercase;'>Per-Author Annual Funding (Mean, 3-Year Windows)</h5>",
       "<div style='display: flex; justify-content: space-between; margin-bottom: 20px;'>",
       "<div style='text-align: center; width: 48%;'>",
       "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Pre-Retraction</div>",
@@ -742,10 +750,13 @@ server <- function(input, output, session) {
       "<div style='text-align: center; margin-bottom: 20px;'>",
       "<span style='font-size: 14px; color: #666; text-transform: uppercase; font-weight: bold;'>Change: </span>",
       "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>",
-      sprintf("%+.1f%%", pct_change),
+      pct_change_txt,
       "</span>",
+      "<div style='font-size: 12px; color: #777; margin-top: 4px;'>% of cohort with any active NIH funding: ",
+      sprintf("%.1f%%", pct_funded_pre), " pre &rarr; ", sprintf("%.1f%%", pct_funded_post), " post (",
+      sprintf("%+.1f pp", pct_funded_change), ")</div>",
       "</div>",
-      
+
       # NUEVAS CAJAS DE TRANSICIÓN DE FONDOS
       "<div style='display: flex; justify-content: space-between; margin-bottom: 20px; font-size: 12px;'>",
       "<div style='width: 48%; background-color: #fdf2f2; padding: 10px; border-radius: 6px; border: 1px solid #fadcdc; text-align: center;'>",
@@ -761,7 +772,7 @@ server <- function(input, output, session) {
       "</div>",
       
       "<div style='background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef;'>",
-      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction. The mean total annual funding granted to these authors was ", dollar(mean_total_pre, accuracy = 1), " and ", dollar(mean_total_post, accuracy = 1), " in the pre- and post-retraction periods, respectively.</div>",
+      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction. The cohort received an average of ", dollar(total_funding_pre, accuracy = 1), " of NIH funding per year in the 3 pre-retraction years and ", dollar(total_funding_post, accuracy = 1), " per year in the 3 post-retraction years.</div>",
       "</div>",
       "</div>"
     ))
@@ -773,9 +784,6 @@ server <- function(input, output, session) {
     mean_post <- mean(tl$Active_Grants[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
     pct_change <- (mean_post - mean_pre) / mean_pre * 100
     pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c") 
-    
-    pd <- paired_data()
-    test_grants <- wilcox.test(pd$Total_Grants_Pre, pd$Total_Grants_Post, paired = TRUE, exact = FALSE)
     
     HTML(paste0(
       "<div style='padding: 10px;'>",
@@ -799,40 +807,7 @@ server <- function(input, output, session) {
       "</div>"
     ))
   })
-  
-  output$stats_total_funding <- renderUI({
-    tl <- df_timeline()
-    mean_pre <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
-    mean_post <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
-    pct_change <- (mean_post - mean_pre) / mean_pre * 100
-    test_funding <- wilcox.test(paired_data()$Annual_Funding_Pre, paired_data()$Annual_Funding_Post, paired = TRUE, exact = FALSE)
-    pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c") 
-    
-    HTML(paste0(
-      "<div style='padding: 10px;'>",
-      "<h5 style='color: #005b96; font-weight: bold; margin-bottom: 20px; text-transform: uppercase;'>3 Years Pre vs Post Retraction</h5>",
-      "<div style='display: flex; justify-content: space-between; margin-bottom: 20px;'>",
-      "<div style='text-align: center; width: 48%;'>",
-      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Pre-Retraction</div>",
-      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", dollar(mean_pre, accuracy = 1), "</div>",
-      "</div>",
-      "<div style='text-align: center; width: 48%; border-left: 1px solid #eee;'>",
-      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Post-Retraction</div>",
-      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", dollar(mean_post, accuracy = 1), "</div>",
-      "</div>",
-      "</div>",
-      "<div style='text-align: center; margin-bottom: 25px;'>",
-      "<span style='font-size: 14px; color: #666; text-transform: uppercase; font-weight: bold;'>Change: </span>",
-      "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>",
-      sprintf("%+.1f%%", pct_change),
-      "</span>",
-      "</div>",
-      "</div>"
-    ))
-  })
-  
 
-  
 }
 
 # 5. RUN APP
