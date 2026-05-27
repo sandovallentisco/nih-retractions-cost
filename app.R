@@ -85,6 +85,9 @@ add_margin <- function(v, pad = 0.15) {
   c(r[1] - d * pad, r[2] + d * pad)
 }
 
+# Helper: abbreviated dollar formatter (e.g., $1.23B, $755K)
+dollar_short <- scales::label_dollar(accuracy = 0.01, scale_cut = scales::cut_short_scale())
+
 # --- LOAD AUTHORS ---
 df_authors_raw <- read_csv(authors_file, show_col_types = FALSE)
 
@@ -772,7 +775,7 @@ server <- function(input, output, session) {
       "</div>",
       
       "<div style='background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef;'>",
-      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction. The cohort received an average of ", dollar(total_funding_pre, accuracy = 1), " of NIH funding per year in the 3 pre-retraction years and ", dollar(total_funding_post, accuracy = 1), " per year in the 3 post-retraction years.</div>",
+      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction. Considering the ", comma(total_authors), " authors, this cohort received ", dollar_short(total_funding_pre), " of NIH funding per year in the 3 pre-retraction years and ", dollar_short(total_funding_post), " per year in the 3 post-retraction years, amounting to ", dollar_short(total_funding_pre * 3), " and ", dollar_short(total_funding_post * 3), " across the 3 pre and post-retraction years.</div>",
       "</div>",
       "</div>"
     ))
