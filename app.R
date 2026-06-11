@@ -77,16 +77,19 @@ df_papers <- read_csv(papers_file, show_col_types = FALSE) %>%
   left_join(annual_cpi, by = c("Publication_Year" = "Fiscal_Year")) %>%
   mutate(attributed_cost_adjusted = attributed_cost_raw * Inflation_Multiplier)
 
-# Helper: data-driven y-axis limits with a 15% margin (matches preprint Figure 2)
-add_margin <- function(v, pad = 0.15) {
-  r <- range(v, na.rm = TRUE)
-  d <- diff(r)
-  if (!is.finite(d) || d == 0) d <- max(abs(r[1]), 1) * 0.1
-  c(r[1] - d * pad, r[2] + d * pad)
+# Helper: data-driven y-axis limits starting at zero (top-padded so points don't touch frame)
+add_margin <- function(v, pad = 0.10) {
+  c(0, max(v, na.rm = TRUE) * (1 + pad))
 }
 
 # Helper: abbreviated dollar formatter (e.g., $1.23B, $755K)
 dollar_short <- scales::label_dollar(accuracy = 0.01, scale_cut = scales::cut_short_scale())
+
+# Helper: format p-values for inline reporting
+fmt_p <- function(p) {
+  if (is.na(p)) return("NA")
+  if (p < 0.001) "p &lt; 0.001" else sprintf("p = %.3f", p)
+}
 
 # --- LOAD AUTHORS ---
 df_authors_raw <- read_csv(authors_file, show_col_types = FALSE)
@@ -284,7 +287,7 @@ ui <- navbarPage(
              ),
              fluidRow(
                column(6, div(class = "nih-card",
-                             h4("Average Funding Granted to Retracted Authors"),
+                             h4("Funding Index (Year -3 = 100)"),
                              withSpinner(plotlyOutput("plot_avg_funding"), type = 4, color = "#17a2b8"),
                              uiOutput("plot_avg_funding_note"))),
                column(6, div(class = "nih-card",
@@ -302,7 +305,7 @@ ui <- navbarPage(
              ),
              fluidRow(
                column(6, div(class = "nih-card",
-                             h4("Percent Change in Average Funding (Pre vs. Post Retraction)"),
+                             h4("Per-Author Funding Pre vs. Post Retraction (with cohort median)"),
                              withSpinner(plotlyOutput("plot_dumbbell_funding", height = "400px"), type = 4, color = "#17a2b8"))),
                column(6, div(class = "nih-card",
                              h4("Distribution of Individual % Change"),
@@ -582,11 +585,14 @@ server <- function(input, output, session) {
       mutate(Cohort_Authors = total_cohort_authors,
              Average_Funding_Per_Author = Total_Adjusted_Funding / total_cohort_authors,
              Pct_With_Funding = N_Funded / total_cohort_authors * 100,
-             Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"))
+             Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"),
+             # Funding index relative to year -3 (year -3 = 100)
+             Funding_Index = Average_Funding_Per_Author /
+                             Average_Funding_Per_Author[diff_retracted == -3] * 100)
   })
-  
+
   timeline_colors <- c("Retraction Year (0)" = "#cccccc", "Normal Years" = "#005b96")
-  
+
   output$plot_active_grants <- renderPlotly({
     tl <- df_timeline()
     p <- ggplot(tl, aes(x = diff_retracted, y = Active_Grants, text = paste("Year offset:", diff_retracted, "<br>Active Grants:", comma(Active_Grants)))) +
@@ -595,7 +601,7 @@ server <- function(input, output, session) {
       geom_point(aes(color = Period_Label), size = 2) +
       scale_color_manual(values = timeline_colors) +
       scale_x_continuous(breaks = -3:3) +
-      scale_y_continuous(labels = comma, limits = add_margin(tl$Active_Grants)) +
+      scale_y_continuous(labels = comma, limits = add_margin(tl$Active_Grants), expand = expansion(mult = c(0, 0))) +
       labs(x = "Years from First Retraction", y = "Total Active Grants") +
       dashboard_theme + theme(legend.position = "none")
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
@@ -603,83 +609,99 @@ server <- function(input, output, session) {
 
   output$plot_avg_funding <- renderPlotly({
     tl <- df_timeline()
-    p <- ggplot(tl, aes(x = diff_retracted, y = Average_Funding_Per_Author,
+    p <- ggplot(tl, aes(x = diff_retracted, y = Funding_Index,
                         text = paste("Year offset:", diff_retracted,
-                                     "<br>Average funding:", dollar(Average_Funding_Per_Author)))) +
+                                     "<br>Funding index (year -3 = 100):", sprintf("%.1f", Funding_Index)))) +
       geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8) +
+      geom_hline(yintercept = 100, color = "gray60", linetype = "dotted", linewidth = 0.6) +
       geom_line(color = "#005b96", linewidth = 0.5, group = 1) +
       geom_point(aes(color = Period_Label), size = 2) +
       scale_color_manual(values = timeline_colors) +
       scale_x_continuous(breaks = -3:3) +
-      scale_y_continuous(labels = label_dollar(), limits = add_margin(tl$Average_Funding_Per_Author)) +
-      labs(x = "Years from First Retraction", y = "Average CPI-adjusted Funding ($)") +
+      scale_y_continuous(limits = add_margin(tl$Funding_Index), expand = expansion(mult = c(0, 0))) +
+      labs(x = "Years from First Retraction", y = "Funding Index (year -3 = 100)") +
       dashboard_theme + theme(legend.position = "none")
     ggplotly(p, tooltip = "text") %>% layout(showlegend = FALSE)
   })
   
   output$plot_dumbbell_funding <- renderPlotly({
     pd <- paired_data()
-    tl <- df_timeline()
-    
-    # Calculate means exactly as in stats_avg_funding to match the global statistics
-    mean_pre <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
-    mean_post <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
-    pct_change <- (mean_post - mean_pre) / mean_pre
-    if (is.nan(pct_change) | is.infinite(pct_change)) pct_change <- 0
-    
+
+    # Cohort-wide medians (match stats_avg_funding); $0 imputation for missing pairs
+    cohort_set <- filtered_authors() %>% distinct(Original_Author_Name)
+    pd_full <- cohort_set %>%
+      left_join(pd, by = "Original_Author_Name") %>%
+      mutate(across(c(Annual_Funding_Pre, Annual_Funding_Post),
+                    ~ ifelse(is.na(.x), 0, .x)))
+    median_pre  <- median(pd_full$Annual_Funding_Pre)
+    median_post <- median(pd_full$Annual_Funding_Post)
+
     # Random sample for interactive Plotly to prevent browser crash
     set.seed(42)
-    pd_sample <- pd %>% 
+    pd_sample <- pd %>%
       sample_n(min(300, n())) %>%
-      mutate(Indiv_Pct_Change = ifelse(Annual_Funding_Pre > 0, 
-                                       (Annual_Funding_Post - Annual_Funding_Pre) / Annual_Funding_Pre, 
+      mutate(Indiv_Pct_Change = ifelse(Annual_Funding_Pre > 0,
+                                       (Annual_Funding_Post - Annual_Funding_Pre) / Annual_Funding_Pre,
                                        ifelse(Annual_Funding_Post > 0, 1, 0))) %>%
       mutate(Indiv_Pct_Change_Capped = pmax(pmin(Indiv_Pct_Change, 3), -1))
-    
-    # Long format for spaghetti
+
     df_long <- pd_sample %>%
       select(Original_Author_Name, `Pre-Retraction` = Annual_Funding_Pre, `Post-Retraction` = Annual_Funding_Post, Indiv_Pct_Change_Capped, Indiv_Pct_Change) %>%
       pivot_longer(cols = c(`Pre-Retraction`, `Post-Retraction`), names_to = "Period", values_to = "Funding") %>%
       mutate(Period = factor(Period, levels = c("Pre-Retraction", "Post-Retraction")))
-      
-    # Mean format
-    df_mean <- data.frame(
+
+    df_median <- data.frame(
       Period = factor(c("Pre-Retraction", "Post-Retraction"), levels = c("Pre-Retraction", "Post-Retraction")),
-      Funding = c(mean_pre, mean_post)
+      Funding = c(median_pre, median_post)
     )
-    
-    col_mean <- ifelse(mean_post < mean_pre, "#d9534f", "#005b96")
-    
+
+    # Softer diverging palette (blue=decrease, pale yellow=neutral, red=increase).
+    # Anchor positions at +/-10% so even moderate changes look clearly blue or red,
+    # rather than washing out into the neutral middle.
+    soft_palette   <- c("#4393c3", "#92c5de", "#fee090", "#fdae61", "#d6604d")
+    palette_breaks <- c(-1, -0.10, 0, 0.10, 3)
+    palette_domain <- c(-1, 3)
+    breaks_rescaled <- scales::rescale(palette_breaks, from = palette_domain)
+
+    # Color the cohort-median reference line by its % change using the same scale
+    # (same interpolation as scale_color_gradientn so the line color matches the
+    # spaghetti color at the same numeric value).
+    median_pct_change <- if (median_pre > 0) (median_post - median_pre) / median_pre else 0
+    median_pct_capped <- pmax(pmin(median_pct_change, palette_domain[2]), palette_domain[1])
+    pal_fn <- scales::gradient_n_pal(colours = soft_palette, values = breaks_rescaled)
+    col_median <- pal_fn(scales::rescale(median_pct_capped, from = palette_domain))
+
     p <- ggplot() +
       geom_line(data = df_long, aes(x = Period, y = Funding, group = Original_Author_Name, color = Indiv_Pct_Change_Capped,
-                                    text = paste("Author:", Original_Author_Name, "<br>Period:", Period, "<br>Funding:", dollar(Funding), "<br>Change:", percent(Indiv_Pct_Change, accuracy = 0.1))), 
-                alpha = 0.5, linewidth = 0.5) +
-      scale_color_gradientn(colors = c("blue", "yellow", "red"),
-                            values = scales::rescale(c(-1, 0, 3), from = c(-1, 3)),
-                            limits = c(-1, 3),
+                                    text = paste("Author:", Original_Author_Name, "<br>Period:", Period, "<br>Funding:", dollar(Funding), "<br>Change:", percent(Indiv_Pct_Change, accuracy = 0.1))),
+                alpha = 0.55, linewidth = 0.5) +
+      scale_color_gradientn(colors = soft_palette,
+                            values = breaks_rescaled,
+                            limits = palette_domain,
                             labels = percent, name = "% Change") +
-      geom_line(data = df_mean, aes(x = Period, y = Funding, group = 1), 
+      geom_line(data = df_median, aes(x = Period, y = Funding, group = 1),
                 color = "black", linewidth = 3) +
-      geom_line(data = df_mean, aes(x = Period, y = Funding, group = 1), 
-                color = col_mean, linewidth = 1.5) +
-      geom_point(data = df_mean, aes(x = Period, y = Funding, 
-                                     text = paste("Mean", Period, ":", dollar(Funding))), 
-                 color = col_mean, size = 4) +
+      geom_line(data = df_median, aes(x = Period, y = Funding, group = 1),
+                color = col_median, linewidth = 1.5) +
+      geom_point(data = df_median, aes(x = Period, y = Funding,
+                                       text = paste("Cohort median", Period, ":", dollar(Funding),
+                                                    "<br>Change:", percent(median_pct_change, accuracy = 0.1))),
+                 color = col_median, size = 4) +
       scale_y_continuous(labels = label_dollar(), limits = c(0, NA)) +
-      labs(x = "", y = "Average Annual Funding ($)") +
+      labs(x = "", y = "Annual Funding ($) — individual authors") +
       dashboard_theme +
       theme(
         panel.grid.major.x = element_blank(),
         legend.position = "right"
       )
-      
+
     ggplotly(p, tooltip = "text") %>% layout(margin = list(b = 40, t = 40, l = 10, r = 10))
   })
   
   output$plot_avg_funding_note <- renderUI({
     fa <- filtered_authors()
     total_authors <- n_distinct(fa$Original_Author_Name)
-    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: The average is calculated taking into account every unique retracted author (", comma(total_authors), "). Authors receiving no funding in a given year are counted as $0, reflecting the formula: Average Funding (Year X) = Total Funding (Year X) / Total Unique Retracted Authors. To find the funding granted to retracted authors in the NIH RePORTER system, we used strict name matching (requiring an exact match of first, middle, and last names). This approach minimizes the possibility of false positives, but if an author was not found due to a name variation, they are treated as having $0 funding, making this a conservative estimate of the financial impact.</p>"))
+    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: The plot shows a funding index for the cohort (", comma(total_authors), " authors), where year -3 is rescaled to 100 and the other year offsets are expressed relative to that baseline. A value of 80 means the cohort received 80% of the year--3 funding; 120 means 20% more. The per-author pre-vs-post medians and Wilcoxon signed-rank test reported in the statistics panel are instead computed by first averaging each author's funding within the 3-year window and then taking the median across the full cohort (authors with no funding in the window contribute $0). To find the funding granted to retracted authors in the NIH RePORTER system, we used strict name matching (requiring an exact match of first, middle, and last names). This approach minimizes the possibility of false positives, but if an author was not found due to a name variation, they are treated as having $0 funding, making this a conservative estimate of the financial impact.</p>"))
   })
   
   # --- Statistical tests ---
@@ -711,9 +733,20 @@ server <- function(input, output, session) {
   # --- ESTADÍSTICAS GLOBALES PARA LA FILA SUPERIOR ---
   output$stats_avg_funding <- renderUI({
     tl <- df_timeline()
-    mean_pre  <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
-    mean_post <- mean(tl$Average_Funding_Per_Author[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
-    pct_change <- if (mean_pre > 0) (mean_post - mean_pre) / mean_pre * 100 else NA_real_
+    pd <- paired_data()
+
+    # Cohort-wide paired data: add (0,0) rows for authors with no funding rows in the
+    # +/-3 window, consistent with the cohort-wide imputation convention. Wilcoxon
+    # signed-rank automatically ignores zero differences, so p-values are unchanged.
+    cohort_set <- filtered_authors() %>% distinct(Original_Author_Name)
+    pd_full <- cohort_set %>%
+      left_join(pd, by = "Original_Author_Name") %>%
+      mutate(across(c(Annual_Funding_Pre, Annual_Funding_Post, Total_Grants_Pre, Total_Grants_Post),
+                    ~ ifelse(is.na(.x), 0, .x)))
+
+    median_pre  <- median(pd_full$Annual_Funding_Pre)
+    median_post <- median(pd_full$Annual_Funding_Post)
+    pct_change <- if (median_pre > 0) (median_post - median_pre) / median_pre * 100 else NA_real_
 
     pct_funded_pre  <- mean(tl$Pct_With_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
     pct_funded_post <- mean(tl$Pct_With_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
@@ -723,10 +756,12 @@ server <- function(input, output, session) {
     total_funding_pre  <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
     total_funding_post <- mean(tl$Total_Adjusted_Funding[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
 
+    # Paired Wilcoxon signed-rank test on per-author funding
+    test_funding <- wilcox.test(pd_full$Annual_Funding_Pre, pd_full$Annual_Funding_Post,
+                                paired = TRUE, exact = FALSE)
+
     pct_color <- ifelse(is.na(pct_change) || pct_change >= 0, "#5cb85c", "#d9534f")
 
-    # Denominator must respect the current sensitivity filter so percentages match the cohort shown above
-    pd <- paired_data()
     total_authors <- n_distinct(filtered_authors()$Original_Author_Name)
     active_authors_pre  <- sum(pd$Annual_Funding_Pre  > 0, na.rm = TRUE)
     active_authors_post <- sum(pd$Annual_Funding_Post > 0, na.rm = TRUE)
@@ -735,19 +770,19 @@ server <- function(input, output, session) {
     lost_all_pct <- (lost_all_n / total_authors) * 100
     gained_pct   <- (gained_n   / total_authors) * 100
 
-    pct_change_txt <- if (is.na(pct_change)) "n/a" else sprintf("%+.1f%%", pct_change)
+    pct_change_txt <- if (is.na(pct_change)) "n/a (median pre = $0)" else sprintf("%+.1f%%", pct_change)
 
     HTML(paste0(
       "<div style='padding: 10px;'>",
-      "<h5 style='color: #005b96; font-weight: bold; margin-bottom: 20px; text-transform: uppercase;'>Per-Author Annual Funding (Mean, 3-Year Windows)</h5>",
+      "<h5 style='color: #005b96; font-weight: bold; margin-bottom: 20px; text-transform: uppercase;'>Per-Author Annual Funding (Median, 3-Year Windows)</h5>",
       "<div style='display: flex; justify-content: space-between; margin-bottom: 20px;'>",
       "<div style='text-align: center; width: 48%;'>",
-      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Pre-Retraction</div>",
-      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", dollar(mean_pre, accuracy = 1), "</div>",
+      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Median Pre-Retraction</div>",
+      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", dollar(median_pre, accuracy = 1), "</div>",
       "</div>",
       "<div style='text-align: center; width: 48%; border-left: 1px solid #eee;'>",
-      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Mean Post-Retraction</div>",
-      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", dollar(mean_post, accuracy = 1), "</div>",
+      "<div style='font-size: 12px; color: #777; text-transform: uppercase; font-weight: bold;'>Median Post-Retraction</div>",
+      "<div style='font-size: 24px; font-weight: bold; color: #333;'>", dollar(median_post, accuracy = 1), "</div>",
       "</div>",
       "</div>",
       "<div style='text-align: center; margin-bottom: 20px;'>",
@@ -755,7 +790,8 @@ server <- function(input, output, session) {
       "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>",
       pct_change_txt,
       "</span>",
-      "<div style='font-size: 12px; color: #777; margin-top: 4px;'>% of cohort with any active NIH funding: ",
+      "<div style='font-size: 12px; color: #777; margin-top: 4px;'>Paired Wilcoxon signed-rank test: ", fmt_p(test_funding$p.value), "</div>",
+      "<div style='font-size: 12px; color: #777; margin-top: 2px;'>Avg. annual % of cohort holding an active NIH grant: ",
       sprintf("%.1f%%", pct_funded_pre), " pre &rarr; ", sprintf("%.1f%%", pct_funded_post), " post (",
       sprintf("%+.1f pp", pct_funded_change), ")</div>",
       "</div>",
@@ -783,11 +819,21 @@ server <- function(input, output, session) {
   
   output$stats_active_grants <- renderUI({
     tl <- df_timeline()
-    mean_pre <- mean(tl$Active_Grants[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+    mean_pre  <- mean(tl$Active_Grants[tl$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
     mean_post <- mean(tl$Active_Grants[tl$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
     pct_change <- (mean_post - mean_pre) / mean_pre * 100
-    pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c") 
-    
+    pct_color <- ifelse(pct_change < 0, "#d9534f", "#5cb85c")
+
+    # Paired Wilcoxon signed-rank on per-author grant counts (across the cohort)
+    pd <- paired_data()
+    cohort_set <- filtered_authors() %>% distinct(Original_Author_Name)
+    pd_full <- cohort_set %>%
+      left_join(pd, by = "Original_Author_Name") %>%
+      mutate(across(c(Annual_Funding_Pre, Annual_Funding_Post, Total_Grants_Pre, Total_Grants_Post),
+                    ~ ifelse(is.na(.x), 0, .x)))
+    test_grants <- wilcox.test(pd_full$Total_Grants_Pre, pd_full$Total_Grants_Post,
+                               paired = TRUE, exact = FALSE)
+
     HTML(paste0(
       "<div style='padding: 10px;'>",
       "<h5 style='color: #005b96; font-weight: bold; margin-bottom: 20px; text-transform: uppercase;'>3 Years Pre vs Post Retraction</h5>",
@@ -806,6 +852,7 @@ server <- function(input, output, session) {
       "<span style='font-size: 22px; font-weight: bold; color: ", pct_color, ";'>",
       sprintf("%+.1f%%", pct_change),
       "</span>",
+      "<div style='font-size: 12px; color: #777; margin-top: 4px;'>Paired Wilcoxon signed-rank on per-author grant counts: ", fmt_p(test_grants$p.value), "</div>",
       "</div>",
       "</div>"
     ))
