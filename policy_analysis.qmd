@@ -1,0 +1,718 @@
+---
+title: "Cost of Retracted Articles to the NIH: a Living Analysis"
+author:
+  - "Alejandro Sandoval-Lentisco^1^"
+  - "John P.A. Ioannidis^1^"
+format:
+  html:
+    toc: false
+    number-sections: false
+    css: |
+      h2 { text-transform: uppercase; letter-spacing: 0.05em; font-size: 1.05em; }
+      .analysis-tag { letter-spacing: 0.15em; font-weight: 700; color: #666; }
+  pdf:
+    documentclass: article
+    geometry: margin=2cm
+  docx: default
+execute:
+  echo: false
+  warning: false
+  message: false
+editor_options:
+  chunk_output_type: inline
+bibliography: references.bib
+# Recommended citation style: numbered, Science-style. Download "science.csl" or
+# "vancouver.csl" from https://github.com/citation-style-language/styles and
+# uncomment the following line:
+csl: science.csl
+---
+
+  ^1^ Meta-Research Innovation Center at Stanford (METRICS), Stanford University, CA, USA
+
+**Correspondence:** John P.A. Ioannidis, MD, DSc, 3180 Porter Drive, Stanford Research Park, Palo Alto, CA 94304, USA. E-mail: jioannid\@stanford.edu
+
+```{r setup, include=FALSE}
+# Setup, libraries, and data loading
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(ggplot2)
+library(patchwork)
+library(gridExtra)
+
+corporate_colors <- c("NIH Funded" = "#d16b2a",
+                      "Not NIH Funded" = "#00716f")
+
+dashboard_theme <- theme_classic(base_size = 18) +
+  theme(
+    legend.position  = "top",
+    legend.title     = element_blank(),
+    legend.text      = element_text(size = 20),
+    axis.title       = element_text(size = 20, face = "bold"),
+    axis.text        = element_text(size = 18),
+    plot.background  = element_rect(fill = "transparent", color = NA),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    panel.grid.major.y = element_line(color = "gray90", linewidth = 0.5)
+  )
+
+# Input files
+papers_file  <- "data/processed/FINAL_Retractions_Costs_and_Pubs.csv"
+authors_file <- "data/processed/Author_Funding_Matches.csv"
+cpi_file     <- "data/processed/annual_cpi.csv"
+
+# Load CPI
+annual_cpi <- read_csv(cpi_file, show_col_types = FALSE)
+if (!"Inflation_Multiplier" %in% colnames(annual_cpi)) {
+  current_cpi <- max(annual_cpi$CPI, na.rm = TRUE)
+  annual_cpi$Inflation_Multiplier <- current_cpi / annual_cpi$CPI
+}
+cpi_year <- max(annual_cpi$Fiscal_Year, na.rm = TRUE)
+
+# Load Papers
+df_papers <- read_csv(papers_file, show_col_types = FALSE) %>%
+  mutate(
+    Publication_Year = as.numeric(str_extract(OriginalPaperDate, "(?<=/)\\d{4}")),
+    Retraction_Year  = as.numeric(str_extract(RetractionDate,    "(?<=/)\\d{4}")),
+    retraction_lag   = Retraction_Year - Publication_Year,
+    Funding_Status   = ifelse(!is.na(Total_NIH_Funding_Cost) & Total_NIH_Funding_Cost > 0,
+                              "NIH Funded", "Not NIH Funded"),
+    attributed_cost_raw = ifelse(
+      !is.na(Total_Grant_Pubs) & Total_Grant_Pubs > 0,
+      Total_NIH_Funding_Cost / Total_Grant_Pubs,
+      NA
+    )
+  ) %>%
+  left_join(annual_cpi, by = c("Publication_Year" = "Fiscal_Year")) %>%
+  mutate(attributed_cost_adjusted = attributed_cost_raw * Inflation_Multiplier)
+
+# Load Authors
+df_authors_raw <- read_csv(authors_file, show_col_types = FALSE)
+
+author_retractions <- df_authors_raw %>%
+  group_by(Original_Author_Name) %>%
+  summarise(Num_Retractions = n_distinct(Record_ID), .groups = "drop")
+
+df_authors <- df_authors_raw %>%
+  group_by(Original_Author_Name) %>%
+  mutate(First_Retraction_Year = min(Retraction_Year, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(diff_retracted = Fiscal_Year - First_Retraction_Year) %>%
+  distinct(Original_Author_Name, First_Retraction_Year, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
+  left_join(annual_cpi, by = "Fiscal_Year") %>%
+  mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier) %>%
+  left_join(author_retractions, by = "Original_Author_Name")
+
+# Restrict the author-consequences cohort to authors whose first retraction is early
+# enough that a full +3-year post-retraction window is observable.
+latest_fiscal_year     <- max(df_authors$Fiscal_Year, na.rm = TRUE)
+retraction_cutoff_year <- latest_fiscal_year - 3
+df_authors_cohort      <- df_authors %>% filter(First_Retraction_Year <= retraction_cutoff_year)
+
+# Helpers
+dollar_short <- scales::label_dollar(accuracy = 0.01, scale_cut = scales::cut_short_scale())
+fmt_p <- function(p) {
+  if (is.na(p)) return("NA")
+  if (p < 0.001) "p < 0.001" else sprintf("p = %.3f", p)
+}
+# Inline reporting of a test statistic together with its p-value. wilcox_stat auto-labels the
+# statistic V (paired signed-rank) or W (rank-sum); mcnemar_stat reports chi-squared with df.
+# Math symbols ($V$, $W$, $\chi^2$) render in HTML, PDF and DOCX.
+wilcox_stat  <- function(t) sprintf("$%s$ = %s, %s", names(t$statistic),
+                                    comma(round(unname(t$statistic))), fmt_p(t$p.value))
+mcnemar_stat <- function(t) sprintf("$\\chi^2$(%d) = %.1f, %s", unname(t$parameter),
+                                    unname(t$statistic), fmt_p(t$p.value))
+
+# Key paper-level values
+Sys.setlocale("LC_TIME", "C")
+month_year <- format(Sys.Date(), "%B %Y")
+total_articles <- nrow(df_papers)
+nih_articles   <- sum(df_papers$Funding_Status == "NIH Funded")
+percent_funded <- nih_articles / total_articles
+mean_cost    <- mean(df_papers$attributed_cost_adjusted, na.rm = TRUE)
+total_cost     <- sum(df_papers$attributed_cost_adjusted, na.rm = TRUE)
+# ===========================================================================
+# Grant-level cost of NIH-funded retractions (beyond the per-paper attributed cost).
+# Three complementary measures of direct cost are produced:
+#   (1) total_cost              -> attributed cost: each grant's award divided by its number
+#                                  of publications, summed over retracted papers [headline].
+#   (2) total_cost_unique_grants-> full award of every DISTINCT grant behind a retracted
+#                                  paper, counted ONCE (no per-paper attribution; no double-
+#                                  counting of grants shared across papers).
+#   (3) total_cost_personal     -> of (2), only grants awarded directly to the investigator
+#                                  (research/career/fellowship + U01), excluding institutional
+#                                  center/infrastructure grants (P30, M01, training, ...).
+# Full rationale in the Supplementary methods.
+# ===========================================================================
+
+# --- (2) Unique-grant cost, no double counting -----------------------------
+# Funding_Info_cleaned holds the grant IDs (IC + serial, e.g. "CA203737") and
+# Individual_NIH_Grant_Costs the matching full awards, aligned position-for-position (both
+# ";"-separated). We split both, pair them by position, and carry the paper's CPI multiplier
+# (Inflation_Multiplier, derived from its publication year) so the award can be adjusted later.
+.grant_costs <- df_papers %>%
+  filter(Funding_Status == "NIH Funded") %>%
+  transmute(mult = Inflation_Multiplier,
+            pair = map2(str_split(Funding_Info_cleaned, ";"),
+                        str_split(Individual_NIH_Grant_Costs, ";"),
+                        ~ tibble(grant = str_trim(.x), gcost = as.numeric(str_trim(.y))))) %>%
+  unnest(pair) %>%                                   # -> one row per (paper, grant)
+  filter(!is.na(grant), grant != "", !is.na(gcost)) %>%
+  # De-duplicate by grant: take its award ONCE (first(): a grant carries the same award in
+  # every paper that cites it -- verified internally consistent), and a representative CPI
+  # multiplier = mean over the papers citing it (a grant spans several publication years).
+  group_by(grant) %>% summarise(gcost = first(gcost), mult = mean(mult, na.rm = TRUE), .groups = "drop")
+# Grants cited only by papers with no valid publication year get a non-finite mult; back-fill
+# with the overall mean so they remain adjustable.
+.mult_fallback <- mean(.grant_costs$mult[is.finite(.grant_costs$mult)])
+.grant_costs   <- .grant_costs %>% mutate(mult = ifelse(is.finite(mult), mult, .mult_fallback))
+n_unique_grants          <- nrow(.grant_costs)        # number of distinct grants
+total_cost_unique_grants <- sum(.grant_costs$gcost)   # nominal $, counted once per grant
+
+# --- (3) Personal vs institutional: recover each grant's NIH activity code --
+# The activity code (R01, P30, U01, ...) is NOT in Funding_Info_cleaned but IS in the raw
+# Funding_Info text, e.g. "NCI NIH HHS (R01 CA203737)". This regex captures the 3 parts of a
+# grant number anywhere it appears: activity code | IC (2 letters) | serial. The optional
+# space (\\s*) also matches concatenated forms such as "U19AI057229" or "5P50CA101942".
+.code_pat <- "([A-Z][A-Z0-9]{2})\\s*([A-Z]{2})([0-9]{4,})"
+# Map grant (IC+serial) -> activity code, parsed from the raw Funding_Info text.
+.fi_map <- df_papers %>% filter(Funding_Status == "NIH Funded") %>%
+  transmute(m = str_match_all(Funding_Info, .code_pat)) %>%            # every code per paper
+  mutate(p = map(m, ~ tibble(grant = paste0(.x[, 3], .x[, 4]),         # grant = IC + serial
+                             act   = .x[, 2]))) %>%                     # act   = activity code
+  select(p) %>% unnest(p) %>%
+  distinct(grant, act) %>% group_by(grant) %>% summarise(act_fi = first(act), .groups = "drop")
+# Fallback map from the authors file, whose Grant_ID carries the full grant number
+# (e.g. "K08HL086671"); recovers codes for grants not parseable from Funding_Info.
+.au_map <- df_authors_raw %>%
+  transmute(m = str_match(Grant_ID, .code_pat)) %>%
+  transmute(grant = paste0(m[, 3], m[, 4]), act = m[, 2]) %>%
+  filter(!is.na(act)) %>% distinct(grant, act) %>%
+  group_by(grant) %>% summarise(act_au = first(act), .groups = "drop")
+# Attach the code (prefer Funding_Info, else the authors file -> ~95% of dollars coded) and
+# flag "personal" grants: research/career/fellowship (codes starting R/K/F) plus the NIH
+# Director's high-risk personal awards (DP1/DP2/DP5). Excludes institutional career (K12/KL2),
+# SBIR/STTR (R41-R44), institutional R-series mechanisms (R24 resource, R25 education, RL1
+# linked), and U01 cooperative agreements (some are large multi-site consortia); P01 program
+# projects are institutional here. Uncoded grants (NA) -> not personal.
+.grants_typed <- .grant_costs %>%
+  left_join(.fi_map, by = "grant") %>% left_join(.au_map, by = "grant") %>%
+  mutate(activity = toupper(coalesce(act_fi, act_au)),
+         personal = coalesce((str_detect(activity, "^[RKF]") &
+                              !activity %in% c("K12", "KL2", "R24", "R25", "R41", "R42", "R43", "R44", "RL1")) |
+                             activity %in% c("DP1", "DP2", "DP5"), FALSE))
+total_cost_personal     <- sum(.grants_typed$gcost[.grants_typed$personal])                        # nominal $
+total_cost_personal_adj <- sum((.grants_typed$gcost * .grants_typed$mult)[.grants_typed$personal]) # CPI-adjusted $
+n_grants_personal       <- sum(.grants_typed$personal)
+pct_personal_of_grants  <- total_cost_personal / total_cost_unique_grants * 100
+
+# Reference values for dynamic phrasing
+nih_annual_budget   <- 47e9   # current NIH annual budget (USD)
+stern2014_cost      <- 58e6   # USD reported in Stern et al. 2014
+pct_of_budget       <- (total_cost / nih_annual_budget) * 100
+fold_increase_stern <- total_cost / stern2014_cost
+
+# Retraction lag (mean) + Mann-Whitney
+valid_lag_data <- df_papers %>% filter(!is.na(retraction_lag) & retraction_lag >= 0)
+nih_mean_lag_val <- round(mean(valid_lag_data$retraction_lag[valid_lag_data$Funding_Status == "NIH Funded"], na.rm = TRUE), 2)
+oth_mean_lag_val <- round(mean(valid_lag_data$retraction_lag[valid_lag_data$Funding_Status == "Not NIH Funded"], na.rm = TRUE), 2)
+nih_lag_test <- wilcox.test(
+  valid_lag_data$retraction_lag[valid_lag_data$Funding_Status == "NIH Funded"],
+  valid_lag_data$retraction_lag[valid_lag_data$Funding_Status == "Not NIH Funded"],
+  exact = FALSE
+)
+nih_lag_p_txt <- wilcox_stat(nih_lag_test)
+
+# % of NIH-funded papers in BLS or HSC
+nih_domain_classified <- df_papers %>%
+  filter(Funding_Status == "NIH Funded") %>%
+  drop_na(Subject) %>%
+  mutate(Paper_ID = row_number()) %>%
+  separate_rows(Subject, sep = ";") %>%
+  mutate(Subject = str_trim(Subject),
+         Acronym = str_extract(Subject, "^\\([^)]+\\)")) %>%
+  filter(Acronym %in% c("(BLS)", "(HSC)")) %>%
+  distinct(Paper_ID)
+nih_pct_bls_hsc <- n_distinct(nih_domain_classified$Paper_ID) / nih_articles * 100
+
+# Cohort-level metrics
+total_cohort_authors <- n_distinct(df_authors_cohort$Original_Author_Name)
+
+per_author_year_funding <- df_authors_cohort %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+  group_by(Original_Author_Name, diff_retracted) %>%
+  summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE), .groups = "drop")
+
+df_timeline <- df_authors_cohort %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+  group_by(diff_retracted) %>%
+  summarise(Total_Adjusted_Funding = sum(Funding_Adjusted, na.rm = TRUE),
+            Active_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)]),
+            .groups = "drop") %>%
+  left_join(
+    per_author_year_funding %>%
+      group_by(diff_retracted) %>%
+      summarise(N_Funded = sum(Annual_Funding > 0), .groups = "drop"),
+    by = "diff_retracted"
+  ) %>%
+  mutate(Cohort_Authors = total_cohort_authors,
+         Average_Funding_Per_Author = Total_Adjusted_Funding / total_cohort_authors,
+         Pct_With_Funding = N_Funded / total_cohort_authors * 100,
+         Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"),
+         Funding_Index = Average_Funding_Per_Author /
+                         Average_Funding_Per_Author[diff_retracted == -3] * 100)
+
+pct_funded_pre  <- mean(df_timeline$Pct_With_Funding[df_timeline$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+pct_funded_post <- mean(df_timeline$Pct_With_Funding[df_timeline$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+pct_funded_change <- pct_funded_post - pct_funded_pre
+
+total_annual_funding_pre  <- mean(df_timeline$Total_Adjusted_Funding[df_timeline$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+total_annual_funding_post <- mean(df_timeline$Total_Adjusted_Funding[df_timeline$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+
+paired_data <- df_authors_cohort %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3 & diff_retracted != 0) %>%
+  mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>%
+  group_by(Original_Author_Name, Period) %>%
+  summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE) / 3,
+            Total_Grants  = n_distinct(Grant_ID[!is.na(Grant_ID)]),
+            .groups = "drop") %>%
+  pivot_wider(names_from = Period,
+              values_from = c(Annual_Funding, Total_Grants),
+              values_fill = list(Annual_Funding = 0, Total_Grants = 0))
+
+paired_data_full <- df_authors_cohort %>% distinct(Original_Author_Name) %>%
+  left_join(paired_data, by = "Original_Author_Name") %>%
+  mutate(across(c(Annual_Funding_Pre, Annual_Funding_Post, Total_Grants_Pre, Total_Grants_Post),
+                ~ ifelse(is.na(.x), 0, .x)))
+
+median_pre  <- median(paired_data_full$Annual_Funding_Pre)
+median_post <- median(paired_data_full$Annual_Funding_Post)
+pct_change  <- if (median_pre > 0) (median_post - median_pre) / median_pre * 100 else NA_real_
+
+test_funding <- wilcox.test(paired_data_full$Annual_Funding_Pre, paired_data_full$Annual_Funding_Post,
+                            paired = TRUE, exact = FALSE)
+test_grants  <- wilcox.test(paired_data_full$Total_Grants_Pre,  paired_data_full$Total_Grants_Post,
+                            paired = TRUE, exact = FALSE)
+test_funding_p_txt <- wilcox_stat(test_funding)
+test_grants_p_txt  <- wilcox_stat(test_grants)
+
+# Change in the PROPORTION of authors holding any NIH funding (pre vs post) -> McNemar test.
+test_funded <- mcnemar.test(table(
+  factor(paired_data_full$Annual_Funding_Pre  > 0, levels = c(FALSE, TRUE)),
+  factor(paired_data_full$Annual_Funding_Post > 0, levels = c(FALSE, TRUE))))
+test_funded_p_txt <- mcnemar_stat(test_funded)
+
+lost_all_n <- sum(paired_data$Annual_Funding_Pre > 0 & paired_data$Annual_Funding_Post == 0, na.rm = TRUE)
+gained_n   <- sum(paired_data$Annual_Funding_Pre == 0 & paired_data$Annual_Funding_Post > 0, na.rm = TRUE)
+lost_all_pct <- (lost_all_n / total_cohort_authors) * 100
+gained_pct   <- (gained_n   / total_cohort_authors) * 100
+
+total_grants_pre <- df_authors_cohort %>%
+  filter(diff_retracted %in% c(-3, -2, -1)) %>%
+  pull(Grant_ID) %>% na.omit() %>% n_distinct()
+total_grants_post <- df_authors_cohort %>%
+  filter(diff_retracted %in% c(1, 2, 3)) %>%
+  pull(Grant_ID) %>% na.omit() %>% n_distinct()
+pct_change_grants <- (total_grants_post - total_grants_pre) / total_grants_pre * 100
+
+# Sensitivity (>1 retraction)
+sens_authors <- df_authors_cohort %>% filter(Num_Retractions > 1)
+sens_cohort_authors <- n_distinct(sens_authors$Original_Author_Name)
+
+per_author_year_funding_sens <- sens_authors %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+  group_by(Original_Author_Name, diff_retracted) %>%
+  summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE), .groups = "drop")
+
+sens_timeline <- sens_authors %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+  group_by(diff_retracted) %>%
+  summarise(Total_Adjusted_Funding = sum(Funding_Adjusted, na.rm = TRUE),
+            Active_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)]),
+            .groups = "drop") %>%
+  left_join(
+    per_author_year_funding_sens %>%
+      group_by(diff_retracted) %>%
+      summarise(N_Funded = sum(Annual_Funding > 0), .groups = "drop"),
+    by = "diff_retracted"
+  ) %>%
+  mutate(Average_Funding_Per_Author = Total_Adjusted_Funding / sens_cohort_authors,
+         Pct_With_Funding = N_Funded / sens_cohort_authors * 100,
+         Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"),
+         Funding_Index = Average_Funding_Per_Author /
+                         Average_Funding_Per_Author[diff_retracted == -3] * 100)
+
+sens_pct_funded_pre  <- mean(sens_timeline$Pct_With_Funding[sens_timeline$diff_retracted %in% c(-3, -2, -1)], na.rm = TRUE)
+sens_pct_funded_post <- mean(sens_timeline$Pct_With_Funding[sens_timeline$diff_retracted %in% c(1, 2, 3)], na.rm = TRUE)
+sens_pct_funded_change <- sens_pct_funded_post - sens_pct_funded_pre
+
+sens_grants_pre <- sens_authors %>%
+  filter(diff_retracted %in% c(-3, -2, -1)) %>%
+  pull(Grant_ID) %>% na.omit() %>% n_distinct()
+sens_grants_post <- sens_authors %>%
+  filter(diff_retracted %in% c(1, 2, 3)) %>%
+  pull(Grant_ID) %>% na.omit() %>% n_distinct()
+sens_pct_change_grants <- (sens_grants_post - sens_grants_pre) / sens_grants_pre * 100
+
+sens_paired_data <- sens_authors %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3 & diff_retracted != 0) %>%
+  mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>%
+  group_by(Original_Author_Name, Period) %>%
+  summarise(Annual_Funding = sum(Funding_Adjusted, na.rm = TRUE) / 3,
+            Total_Grants  = n_distinct(Grant_ID[!is.na(Grant_ID)]),
+            .groups = "drop") %>%
+  pivot_wider(names_from = Period,
+              values_from = c(Annual_Funding, Total_Grants),
+              values_fill = list(Annual_Funding = 0, Total_Grants = 0))
+
+sens_paired_data_full <- sens_authors %>% distinct(Original_Author_Name) %>%
+  left_join(sens_paired_data, by = "Original_Author_Name") %>%
+  mutate(across(c(Annual_Funding_Pre, Annual_Funding_Post, Total_Grants_Pre, Total_Grants_Post),
+                ~ ifelse(is.na(.x), 0, .x)))
+
+sens_median_pre  <- median(sens_paired_data_full$Annual_Funding_Pre)
+sens_median_post <- median(sens_paired_data_full$Annual_Funding_Post)
+sens_pct_change  <- if (sens_median_pre > 0) (sens_median_post - sens_median_pre) / sens_median_pre * 100 else NA_real_
+
+sens_test_funding <- wilcox.test(sens_paired_data_full$Annual_Funding_Pre, sens_paired_data_full$Annual_Funding_Post,
+                                 paired = TRUE, exact = FALSE)
+sens_test_grants  <- wilcox.test(sens_paired_data_full$Total_Grants_Pre,  sens_paired_data_full$Total_Grants_Post,
+                                 paired = TRUE, exact = FALSE)
+sens_test_funding_p_txt <- wilcox_stat(sens_test_funding)
+sens_test_grants_p_txt  <- wilcox_stat(sens_test_grants)
+
+# Change in the PROPORTION of authors holding any NIH funding (funded pre window vs post
+# window) is a paired binary outcome -> McNemar test, to accompany the funded-fraction figures.
+sens_test_funded <- mcnemar.test(table(
+  factor(sens_paired_data_full$Annual_Funding_Pre  > 0, levels = c(FALSE, TRUE)),
+  factor(sens_paired_data_full$Annual_Funding_Post > 0, levels = c(FALSE, TRUE))))
+sens_test_funded_p_txt <- mcnemar_stat(sens_test_funded)
+
+sens_lost_all_n <- sum(sens_paired_data$Annual_Funding_Pre > 0 & sens_paired_data$Annual_Funding_Post == 0, na.rm = TRUE)
+sens_gained_n   <- sum(sens_paired_data$Annual_Funding_Pre == 0 & sens_paired_data$Annual_Funding_Post > 0, na.rm = TRUE)
+sens_lost_all_pct <- (sens_lost_all_n / sens_cohort_authors) * 100
+sens_gained_pct   <- (sens_gained_n   / sens_cohort_authors) * 100
+
+add_margin <- function(v, pad = 0.10) c(0, max(v, na.rm = TRUE) * (1 + pad))
+```
+
+## ABSTRACT
+
+Retractions attract substantial attention [@oransky2010] and have become more frequent over time [@sebo2025; @steen2016]. Retractions reflect the self-correcting nature of science but also wasted resources [@stern2014]. The Retraction Watch Database (RWD) includes over 60,000 records [@oransky2023; @sebo2025a]. We integrated RWD with NIH funding metadata (RePORTER system). As of `r month_year`, the attributed total cost of NIH-funded retracted research is `r dollar(total_cost, scale = 1e-6, accuracy = 1, suffix = " million")`. The total funding awarded to retracted researchers in individual grants is `r dollar(total_cost_personal_adj, scale = 1e-9, accuracy = 0.01, suffix = " billion")`. NIH-funded articles take longer to be retracted (mean = `r nih_mean_lag_val` years) than other US-based articles, which may entail greater downstream implications. Authors with single retractions do not experience substantive decline in total funding within 3 years, while some potential decline was seen for authors with multiple retractions. We have developed a continuously updated dynamic dashboard (<https://sandovallentisco.shinyapps.io/nih-retractions/>) for the cost of retractions reflecting NIH-funded work.
+
+## MAIN TEXT
+
+Retracted publications are a visible manifestation of how science self-corrects, but they may also signal serious weaknesses in research practices and peer review [@oransky2010]. Retracted work, especially when it is due to serious fraudulent practices or major flaws and not just publisher or journal technical errors, may undermine trust in science, distort scientific evidence, and represent a waste of scarce research resources. Although retractions remain rare relative to overall publication volume, their frequency has been climbing for two decades [@sebo2025; @steen2016]. One would wish to estimate the cost of the research work that has been retracted. Previous estimates of the cost of retracted research for the U.S. National Institutes of Health (NIH), the world's largest public funder of biomedical research, examined 149 retracted NIH-funded papers between 1992 and 2012 and reported a direct cost of about \$58 million [@stern2014], but this decade-old figure is now outdated. Far more comprehensive accounting is possible today using the Retraction Watch Database (RWD), a curated, regularly updated catalogue of more than 60,000 retraction records across all disciplines [@oransky2023; @sebo2025a], and NIH funding metadata, accessible through the agency's RePORTER system. We integrated the two systems via an automated weekly pipeline and developed a dynamic dashboard that updates continuously as new retractions are cataloged (<https://sandovallentisco.shinyapps.io/nih-retractions/>). We present here the data for the cost of retracted NIH-funded research as of `r month_year` and discuss some implications of these findings.
+
+## Direct cost to the NIH
+
+We retrieved the latest version of the Retraction Watch Database (RWD) from the Crossref repository (<https://gitlab.com/crossref/retraction-watch-data>) and selected entries marked as retractions, excluding expressions of concern or corrections. We also excluded entries classified as ‘Retract and Replace’, and retractions that did not represent a high likelihood of serious error and/or misconduct by the authors (e.g., administrative or publisher errors). For those eligible retracted articles for which RWD identified an institutional affiliation within the U.S., we queried PubMed using the National Center for Biotechnology Information (NCBI) Entrez API to get supplementary funding metadata (grant IDs and number of publications linked to each grant). Finally, to retrieve the funding amount associated with each grant, we used the NIH Research Portfolio Online Reporting Tools Expenditure and Results (RePORTER) tool. Databases from all available fiscal years were downloaded using the ExPORTER tool (see more details about the method in Supplementary Materials). Data and scripts are available at <https://github.com/sandovallentisco/nih-retractions-cost>.
+
+As of `r month_year`, the RWD listed `r comma(total_articles)` retracted articles with at least one U.S. affiliated author. Of these, `r comma(nih_articles)` (`r sprintf("%.1f%%", percent_funded * 100)`) were linked to at least one NIH grant. These publications were associated with a total of `r comma(n_unique_grants)` distinct NIH grants, i.e., a total of `r dollar_short(total_cost_unique_grants)` in nominal dollars. To calculate the attributed cost per retracted publication, we divided the total grant award by the total number of publications produced under that grant (i.e., attributing a proportional cost to the specific retracted article rather than the entire grant value). The mean attributed cost per retracted NIH-funded article (inflation adjusted) was `r dollar(mean_cost, accuracy = 1)` in `r cpi_year` dollars. Summed across all papers, the adjusted attributed total direct cost is `r dollar(total_cost, scale = 1e-6, accuracy = 1, suffix = " million")`, about 1% of a single year of NIH budget, but a `r sprintf("%.1f", fold_increase_stern)`-fold increase over the previous benchmark [@stern2014]. The total money awarded directly to retracted researchers is `r dollar_short(total_cost_personal_adj)` in `r cpi_year` dollars (considering investigator-held research, career and fellowship awards (R/K/F-series) and the Director's DP awards, but excluding institutional center and infrastructure funding such as P30 or M01, as well as U01 cooperative agreements as some are large multi-site consortia; see Supplementary methods for the exact activity-code rule).
+
+Retracted articles only reflect the work the literature has managed to identify and withdraw, but not the much larger body of flawed or fraudulent work that has yet to be exposed or has been exposed but not yet retracted [@naddaf2026; @scancar2026; @topaz2026]. Therefore the `r dollar(total_cost, scale = 1e-6, accuracy = 1, suffix = " million")` is clearly an underestimate of the wasted resources.  this latter number might be a more realistic estimate of the cost of retracted articles. The `r dollar_short(total_cost_personal_adj)` can be either an overestimate or an underestimate of the wasted resources. Some/much of these researchers’ other work may have been without serious flaws; conversely, other work by other researchers who have no retraction yet may have been seriously flawed or even fraudulent.
+
+## Consequences to retracted authors
+
+We tracked the funding trajectories of `r comma(total_cohort_authors)` first/last authors for the 3 pre- and post-retraction years. We selected cases in which the first retraction occurred by `r retraction_cutoff_year`, so that a full 3-year post-retraction window of funding data was observable for every author in the cohort given the most recent RePORTER fiscal year (`r latest_fiscal_year`). At the cohort level, the total annual NIH funding awarded to these authors was largely unchanged across the pre/post boundary: the per-author cohort-wide median annual funding in the 3 years pre-retraction was `r dollar(median_pre, accuracy = 1)`, and `r dollar(median_post, accuracy = 1)` in the 3 years post retraction (`r sprintf("%+.1f%%", pct_change)`; paired Wilcoxon `r test_funding_p_txt`). Only some small changes were visible: the average annual fraction of the cohort holding an active NIH grant fell from `r sprintf("%.1f%%", pct_funded_pre)` to `r sprintf("%.1f%%", pct_funded_post)` (McNemar's test `r test_funded_p_txt`), the number of unique active grants dropped by `r sprintf("%.1f%%", abs(pct_change_grants))` (paired Wilcoxon `r test_grants_p_txt`). Besides, only `r sprintf("%.1f%%", lost_all_pct)` of previously funded authors lost all NIH funding in the 3 years after their first retraction. The majority retained at least some funding.
+
+For authors with more than one retracted paper (n = `r comma(sens_cohort_authors)`), the median annual funding fell from `r dollar(sens_median_pre, accuracy = 1)` to `r dollar(sens_median_post, accuracy = 1)` (`r sprintf("%+.1f%%", sens_pct_change)`; `r sens_test_funding_p_txt`), the average annual fraction of the cohort holding an active NIH grant changed from `r sprintf("%.1f%%", sens_pct_funded_pre)` to `r sprintf("%.1f%%", sens_pct_funded_post)` (McNemar's test `r sens_test_funded_p_txt`), unique active grants dropped by `r sprintf("%.1f%%", abs(sens_pct_change_grants))` (`r sens_test_grants_p_txt`), and `r sprintf("%.1f%%", sens_lost_all_pct)` of previously funded authors in this subgroup lost all NIH funding in the 3 years after their first retraction. The contrast between the cohort-wide and the subgroup trajectories (See Fig. 1) shows that funding consequences may be larger in cases with repeat retractions compared to those with a single isolated event.
+
+```{r fig1-policy, fig.width=12, fig.height=13, dpi=300}
+# Font sizes matched to Figure 2 (dashboard_theme): base 18, axis titles 20, axis text 18.
+small_theme <- theme_classic(base_size = 18) +
+  theme(
+    legend.position   = "none",
+    axis.title        = element_text(size = 20, face = "bold"),
+    axis.title.y      = element_text(size = 17, face = "bold"),
+    axis.title.x      = element_text(size = 17, face = "bold"),
+    axis.text         = element_text(size = 18),
+    plot.background   = element_rect(fill = "transparent", color = NA),
+    panel.background  = element_rect(fill = "transparent", color = NA),
+    panel.grid.major.y = element_line(color = "gray90", linewidth = 0.5)
+  )
+
+tl_fig2      <- df_timeline
+tl_fig2_sens <- sens_timeline
+timeline_colors_fig2 <- c("Retraction Year (0)" = "#cccccc", "Normal Years" = "#005b96")
+
+y_limits_grants       <- add_margin(tl_fig2$Active_Grants)
+y_limits_grants_sens  <- add_margin(tl_fig2_sens$Active_Grants)
+
+# Panels A-D: within-author change vs. the baseline year -3. For each author and year offset,
+# the difference between their value that year (funding dollars for A/C, active-grant count for
+# B/D) and their value at year -3. A within-author subtraction (not a ratio), so it is defined
+# for the FULL cohort with no restriction, and year -3 is identically 0. (See the preprint's
+# Supplementary methods for the full rationale.)
+make_diff_box_data <- function(per_author_value, cohort_names, value_col = "Annual_Funding") {
+  grid <- tidyr::crossing(Original_Author_Name = cohort_names, diff_retracted = -3:3) %>%
+    left_join(per_author_value, by = c("Original_Author_Name", "diff_retracted")) %>%
+    mutate(.val = ifelse(is.na(.data[[value_col]]), 0, .data[[value_col]]))
+  baseline_by_author <- grid %>% filter(diff_retracted == -3) %>%
+    transmute(Original_Author_Name, Baseline = .val)
+  grid %>% left_join(baseline_by_author, by = "Original_Author_Name") %>%
+    mutate(Funding_Diff = .val - Baseline,
+           Period_Label = ifelse(diff_retracted == 0, "Retraction Year (0)", "Normal Years"))
+}
+# Per-author per-year count of distinct active NIH grants (for Panels B/D).
+per_author_year_grants <- df_authors_cohort %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+  group_by(Original_Author_Name, diff_retracted) %>%
+  summarise(N_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)]), .groups = "drop")
+per_author_year_grants_sens <- sens_authors %>%
+  filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
+  group_by(Original_Author_Name, diff_retracted) %>%
+  summarise(N_Grants = n_distinct(Grant_ID[!is.na(Grant_ID)]), .groups = "drop")
+
+box_fig2        <- make_diff_box_data(per_author_year_funding,      unique(df_authors_cohort$Original_Author_Name))
+box_fig2_sens   <- make_diff_box_data(per_author_year_funding_sens, unique(sens_authors$Original_Author_Name))
+box_grants      <- make_diff_box_data(per_author_year_grants,       unique(df_authors_cohort$Original_Author_Name), "N_Grants")
+box_grants_sens <- make_diff_box_data(per_author_year_grants_sens,  unique(sens_authors$Original_Author_Name),       "N_Grants")
+
+# Boxplot statistics on the differences: box = IQR, whiskers = 10th-90th percentiles, centre = median.
+box_stats <- function(box_data) box_data %>%
+  group_by(diff_retracted, Period_Label) %>%
+  summarise(p10 = quantile(Funding_Diff, 0.10), p25 = quantile(Funding_Diff, 0.25),
+            p50 = median(Funding_Diff), p75 = quantile(Funding_Diff, 0.75),
+            p90 = quantile(Funding_Diff, 0.90), .groups = "drop")
+stat_fig2      <- box_stats(box_fig2)
+stat_fig2_sens <- box_stats(box_fig2_sens)
+
+# Mean change overlaid as a trajectory (box centre is the median, also in dollars).
+mean_line <- function(box_data) box_data %>%
+  group_by(diff_retracted) %>% summarise(Funding_Diff = mean(Funding_Diff), .groups = "drop")
+mean_fig2      <- mean_line(box_fig2)
+mean_fig2_sens <- mean_line(box_fig2_sens)
+
+# Outliers beyond the 10th-90th percentile whiskers.
+outlier_points <- function(box_data) box_data %>%
+  group_by(diff_retracted) %>%
+  mutate(.p10 = quantile(Funding_Diff, 0.10), .p90 = quantile(Funding_Diff, 0.90)) %>%
+  ungroup() %>% filter(Funding_Diff < .p10 | Funding_Diff > .p90)
+out_fig2      <- outlier_points(box_fig2)
+out_fig2_sens <- outlier_points(box_fig2_sens)
+
+# Grant panels (B/D): two-sided display cap at the 2.5th-97.5th pct of the differences.
+diff_cap <- function(box_data)
+  c(quantile(box_data$Funding_Diff, 0.025, na.rm = TRUE),
+    quantile(box_data$Funding_Diff, 0.975, na.rm = TRUE))
+# Tight axis fit to the visible elements (10th-90th-pct whiskers + mean), with only a small 5%
+# margin so the whiskers nearly fill the panel and the within-author changes read more clearly
+# (outliers are not drawn). Used for all four panels.
+whisker_cap <- function(stat_data, mean_data) {
+  lo <- min(c(stat_data$p10, mean_data$Funding_Diff), na.rm = TRUE)
+  hi <- max(c(stat_data$p90, mean_data$Funding_Diff), na.rm = TRUE)
+  pad <- 0.05 * (hi - lo)
+  c(lo - pad, hi + pad)
+}
+y_cap_funding      <- whisker_cap(stat_fig2,      mean_fig2)
+y_cap_funding_sens <- whisker_cap(stat_fig2_sens, mean_fig2_sens)
+
+# Same statistics for the active-grant-count differences (Panels B and D).
+stat_grants <- box_stats(box_grants);      stat_grants_sens <- box_stats(box_grants_sens)
+mean_grants <- mean_line(box_grants);      mean_grants_sens <- mean_line(box_grants_sens)
+out_grants  <- outlier_points(box_grants); out_grants_sens  <- outlier_points(box_grants_sens)
+y_cap_grants <- whisker_cap(stat_grants, mean_grants); y_cap_grants_sens <- whisker_cap(stat_grants_sens, mean_grants_sens)
+
+# (Unused) line-plot factory, retained for reference.
+make_panel <- function(data, y, y_label, y_limits, dollar_y = TRUE,
+                       title = NULL, hline_at = NULL) {
+  p <- ggplot(data, aes(x = diff_retracted, y = .data[[y]])) +
+    geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8)
+  if (!is.null(hline_at))
+    p <- p + geom_hline(yintercept = hline_at, color = "gray60", linetype = "dotted", linewidth = 0.6)
+  p <- p +
+    geom_line(color = "#005b96", linewidth = 0.5, group = 1) +
+    geom_point(aes(color = Period_Label), size = 2.5) +
+    scale_color_manual(values = timeline_colors_fig2) +
+    scale_x_continuous(breaks = -3:3) +
+    scale_y_continuous(labels = if (dollar_y) label_dollar() else comma,
+                       limits = y_limits, expand = expansion(mult = c(0, 0))) +
+    labs(x = "Years from First Retraction", y = y_label, title = title) +
+    small_theme +
+    theme(axis.line.y = element_blank(), axis.ticks.y = element_blank())
+  if (!is.null(title)) p <- p + theme(plot.title = element_text(size = 14, face = "bold", hjust = 0))
+  p
+}
+
+# Boxplot factory for all four panels: within-author change vs. year -3. Drawn as separate
+# layers so the IQR box has NO outline -- a thick errorbar for the 10th-90th-pct whiskers (with
+# T-caps), a filled tile for the IQR (no border), and a segment for the median. Boxes are
+# coloured by period (green = pre-retraction -3..0, orange = post 1..3); the mean change is a
+# continuous black line with black points. No dotted zero line; no y-axis line/ticks.
+make_box_panel <- function(stat_data, mean_data, outlier_data, y_cap, title = NULL,
+                           y_label = "Change in annual NIH funding", dollar_y = TRUE) {
+  period_pal <- c("Pre" = "#00716f", "Post" = "#d16b2a")
+  bw <- 0.6
+  stat_data <- stat_data %>% mutate(Period2 = ifelse(diff_retracted <= 0, "Pre", "Post"))
+  mean_data <- mean_data %>% mutate(Period2 = ifelse(diff_retracted <= 0, "Pre", "Post"))
+  p <- ggplot(stat_data, aes(x = diff_retracted)) +
+    geom_vline(xintercept = 0, color = "#d9534f", linetype = "dashed", linewidth = 0.8) +
+    geom_errorbar(aes(ymin = p10, ymax = p90), width = 0.3, linewidth = 0.4, color = "gray30") +
+    geom_tile(aes(y = (p25 + p75) / 2, height = p75 - p25, fill = Period2),
+              width = bw, color = NA) +
+    geom_segment(aes(x = diff_retracted - bw / 2, xend = diff_retracted + bw / 2,
+                     y = p50, yend = p50), color = "gray30", linewidth = 0.5) +
+    geom_line(data = mean_data, aes(x = diff_retracted, y = Funding_Diff),
+              color = "black", linewidth = 0.8, group = 1) +
+    geom_point(data = mean_data, aes(x = diff_retracted, y = Funding_Diff),
+               color = "black", size = 2.2) +
+    scale_fill_manual(values = period_pal) +
+    scale_x_continuous(breaks = -3:3) +
+    scale_y_continuous(labels = if (dollar_y) label_dollar() else label_number(accuracy = 1)) +
+    coord_cartesian(ylim = y_cap) +
+    labs(x = "Years from First Retraction", y = y_label, title = title) +
+    small_theme +
+    theme(axis.line.y = element_blank(), axis.ticks.y = element_blank())
+  if (!is.null(title)) p <- p + theme(plot.title = element_text(size = 20, face = "bold", hjust = 0))
+  p
+}
+
+p_A <- make_box_panel(stat_fig2,      mean_fig2,      out_fig2,      y_cap_funding)
+p_B <- make_box_panel(stat_grants,      mean_grants,      out_grants,      y_cap_grants,
+                      y_label = "Change in active NIH grants", dollar_y = FALSE)
+p_C <- make_box_panel(stat_fig2_sens, mean_fig2_sens, out_fig2_sens, y_cap_funding_sens)
+p_D <- make_box_panel(stat_grants_sens, mean_grants_sens, out_grants_sens, y_cap_grants_sens,
+                      y_label = "Change in active NIH grants", dollar_y = FALSE)
+
+# Row titles drawn as full-width text strips, placed ABOVE each panel row (above the A/B and
+# C/D tags) so each title spans its two panels.
+title_strip <- function(txt) ggplot() +
+  annotate("text", x = 0.5, y = 0.5, label = txt, fontface = "bold", size = 7) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), clip = "off") +
+  theme_void()
+title1_plot <- title_strip(paste0("All retracted authors (N = ", comma(total_cohort_authors), ")"))
+title2_plot <- title_strip(paste0("Authors with >1 retracted paper (N = ", comma(sens_cohort_authors), ")"))
+
+# Manual legend (bottom strip): period colours, the mean overlay, and the boxplot anatomy.
+legend_plot <- ggplot() +
+  coord_cartesian(xlim = c(0, 100), ylim = c(0, 100), clip = "off") +
+  # Row 1: period colours (well separated to avoid overlap)
+  annotate("rect", xmin = 2, xmax = 5, ymin = 66, ymax = 80, fill = "#00716f", color = NA) +
+  annotate("text", x = 6.5, y = 73, hjust = 0, size = 5.2, label = "Pre-retraction (years -3 to 0)") +
+  annotate("rect", xmin = 52, xmax = 55, ymin = 66, ymax = 80, fill = "#d16b2a", color = NA) +
+  annotate("text", x = 56.5, y = 73, hjust = 0, size = 5.2, label = "Post-retraction (years 1 to 3)") +
+  # Row 2: mean marker + boxplot anatomy
+  annotate("segment", x = 2, xend = 8, y = 26, yend = 26, color = "black", linewidth = 0.9) +
+  annotate("point", x = 5, y = 26, color = "black", size = 3) +
+  annotate("text", x = 9.5, y = 26, hjust = 0, size = 5.2, label = "Mean change") +
+  annotate("segment", x = 33, xend = 33, y = 8, yend = 44, color = "gray30", linewidth = 0.7) +
+  annotate("segment", x = 31.8, xend = 34.2, y = 8,  yend = 8,  color = "gray30", linewidth = 0.7) +
+  annotate("segment", x = 31.8, xend = 34.2, y = 44, yend = 44, color = "gray30", linewidth = 0.7) +
+  annotate("rect", xmin = 31.4, xmax = 34.6, ymin = 18, ymax = 34, fill = "gray80", color = NA) +
+  annotate("segment", x = 31.4, xend = 34.6, y = 26, yend = 26, color = "gray30", linewidth = 0.6) +
+  annotate("text", x = 36.5, y = 26, hjust = 0, size = 5.2,
+           label = "Box = IQR;  centre line = median;  whiskers = 10th-90th pct") +
+  theme_void()
+
+# Title strip over each panel row, the 2x2 boxplot grid, then the legend. Area letters run in
+# alphabetical = plot order; only the four data panels carry a tag (A-D).
+design <- "AAAA\nBBCC\nDDDD\nEEFF\nGGGG"
+(title1_plot + p_A + p_B + title2_plot + p_C + p_D + legend_plot) +
+  plot_layout(design = design, heights = c(0.14, 1.2, 0.14, 1.2, 0.28)) +
+  plot_annotation(tag_levels = list(c("", "A", "B", "", "C", "D", "")))
+```
+
+**Figure 1. Change in funding for retracted authors compared to year -3** Top row (A, B): the full cohort of `r comma(total_cohort_authors)` retracted first/last authors; bottom row (C, D): the `r comma(sens_cohort_authors)` authors with more than one retracted paper. (A, C) inflation-adjusted NIH funding; (B, D) count of distinct active NIH grants. Every panel shows the within-author change relative to the baseline year −3 as a boxplot.
+
+## Time to retract NIH-funded articles
+
+Time-to-retraction (see Fig. 2) is markedly longer for NIH-funded papers than for U.S. retractions without NIH funding (`r nih_mean_lag_val` versus `r oth_mean_lag_val` years on average; Mann-Whitney rank-sum, `r nih_lag_p_txt`). This gap is largely explained by the different mix of retraction reasons: NIH-funded papers are retracted more often for image-integrity and formal misconduct issues (e.g., data fabrication), which take longer to surface and resolve, whereas non-NIH papers are retracted more often for plagiarism, paper mills, or compromised peer review which may be faster and more definitive to document and retract (see more details in Supplementary Table 1 in Supplementary Materials). The practical implication is that NIH-funded results spend longer in the literature before being retracted, with more time to seed downstream studies, clinical practice, and subsequent funding decisions.
+
+```{r}
+#| fig-width: 12
+#| fig-height: 10
+#| warning: false
+
+n_excluded_pub <- sum(df_papers$Publication_Year < 1980, na.rm = TRUE)
+n_excluded_ret <- sum(df_papers$Retraction_Year < 1980, na.rm = TRUE)
+
+p_pub_year <- df_papers %>% drop_na(Publication_Year) %>% filter(Publication_Year >= 1980) %>%
+  rename(`Publication Year` = Publication_Year, `Funding Status` = Funding_Status) %>%
+  count(`Publication Year`, `Funding Status`, name = "No. of articles") %>%
+  ggplot(aes(x = `Publication Year`, y = `No. of articles`, fill = `Funding Status`)) +
+  geom_col(width = 1, color = "white", position = "stack") +
+  scale_fill_manual(values = corporate_colors) +
+  labs(x = "Publication Year", y = "No. of articles") + dashboard_theme +
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank())
+
+p_ret_year <- df_papers %>% drop_na(Retraction_Year) %>% filter(Retraction_Year >= 1980) %>%
+  rename(`Retraction Year` = Retraction_Year, `Funding Status` = Funding_Status) %>%
+  count(`Retraction Year`, `Funding Status`, name = "No. of articles") %>%
+  ggplot(aes(x = `Retraction Year`, y = `No. of articles`, fill = `Funding Status`)) +
+  geom_col(width = 1, color = "white", position = "stack") +
+  scale_fill_manual(values = corporate_colors) +
+  labs(x = "Retraction Year", y = "No. of articles") + dashboard_theme +
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank())
+
+LAG_AXIS_MAX <- 25
+
+n_total_lag   <- nrow(df_papers)
+n_missing_lag <- sum(is.na(df_papers$retraction_lag))
+n_negative    <- sum(df_papers$retraction_lag < 0, na.rm = TRUE)
+valid_lag     <- df_papers %>% filter(!is.na(retraction_lag) & retraction_lag >= 0)
+n_outliers    <- sum(valid_lag$retraction_lag > LAG_AXIS_MAX, na.rm = TRUE)
+# Tallest visible bar, used to position the means key box in Panel C
+ymax_lag <- valid_lag %>% filter(retraction_lag <= LAG_AXIS_MAX) %>%
+  count(retraction_lag) %>% summarise(m = max(n, na.rm = TRUE)) %>% pull(m)
+
+p_lag <- valid_lag %>%
+  rename(`Retraction Lag` = retraction_lag, `Funding Status` = Funding_Status) %>%
+  count(`Retraction Lag`, `Funding Status`, name = "No. of articles") %>%
+  ggplot(aes(x = `Retraction Lag`, y = `No. of articles`, fill = `Funding Status`)) +
+  geom_col(width = 1, color = "white", position = "stack") +
+  # Mean retraction lag for each group, shown on Panel C (Panel D removed)
+  geom_vline(xintercept = oth_mean_lag_val, color = "#00716f", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = nih_mean_lag_val, color = "#d16b2a", linetype = "dashed", linewidth = 1) +
+  # Means key: framed box with a dashed colour sample per group and black text labels
+  annotate("rect", xmin = 12, xmax = LAG_AXIS_MAX, ymin = 0.73 * ymax_lag, ymax = 1.0 * ymax_lag,
+           fill = "white", color = "white", linewidth = 0.5) +
+  annotate("segment", x = 12.7, xend = 15.2, y = 0.92 * ymax_lag, yend = 0.92 * ymax_lag,
+           color = "#d16b2a", linetype = "dashed", linewidth = 1.1) +
+  annotate("segment", x = 12.7, xend = 15.2, y = 0.80 * ymax_lag, yend = 0.80 * ymax_lag,
+           color = "#00716f", linetype = "dashed", linewidth = 1.1) +
+  annotate("text", x = 15.7, y = 0.92 * ymax_lag, hjust = 0, color = "black", size = 4.7,
+           label = sprintf("NIH mean = %.1f yr", nih_mean_lag_val)) +
+  annotate("text", x = 15.7, y = 0.80 * ymax_lag, hjust = 0, color = "black", size = 4.7,
+           label = sprintf("Non-NIH mean = %.1f yr", oth_mean_lag_val)) +
+  scale_fill_manual(values = corporate_colors) +
+  coord_cartesian(xlim = c(0, LAG_AXIS_MAX)) +
+  labs(x = "Years between Publication and Retraction", y = "No. of articles") +
+  dashboard_theme +
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank())
+
+# Layout: A and B on the top row; C (the lag distribution, now annotated with the group
+# means) centred on the bottom row. "#" are empty cells that centre Panel C.
+design <- "AABB\n#CC#"
+combined_plot <- p_pub_year + p_ret_year + p_lag +
+  plot_layout(design = design, guides = "collect") &
+  theme(legend.position = "top")
+
+combined_plot <- combined_plot + plot_annotation(tag_levels = 'A')
+
+print(combined_plot)
+```
+
+**Figure 2. Publication and Retraction Trends.** (A) Distribution of publication years. (B) Distribution of retraction years. (C) Lag between publication and retraction; dashed lines mark the mean lag for NIH-funded (orange) and non-NIH (green) papers. Note: For readability, Panels A and B exclude `r n_excluded_pub` papers published and `r n_excluded_ret` papers retracted before 1980. Likewise, the X axis of Panel C is capped at `r LAG_AXIS_MAX` years; `r format(n_outliers, big.mark = ",")` papers with a lag greater than `r LAG_AXIS_MAX` years are excluded from the plot but included in the means.
+
+## Additional considerations and implications
+
+According to our estimates, the direct financial costs of NIH-funded retracted only represent a very small portion of the NIH budget. However, far more papers are seriously flawed, misleading, or even fraudulent and never get retracted. Therefore, the wasted resources may be much larger. We also found that authors who have had retracted papers are involved in NIH grants that amount to a huge amount of funds, totaling close to \$100B if collaborative grants are included and close to \$7B if only individual-focused grants are considered. Therefore, the footprint of flawed and fraudulent work may relate to a much larger space of research efforts. Furthermore, retraction mechanisms remain slow and flawed as of today, and they only reflect the visible part of a problem that might be much bigger [@naddaf2026; @scancar2026; @topaz2026]. Besides, direct cost is also an underestimate of damage since downstream research that built on flawed conclusions or clinical decisions informed by them also entail cost. Evidence synthesis may also be affected [@bakker2024].
+
+Enhancing detection of papers that warrant retraction is not a simple process. Mass-detection tools (image forensics, "tortured-phrase" scanners, statistical anomaly detectors, or emerging AI-content classifiers) may be funded and developed as research infrastructure and applied as pre- and post-publication surveillance. Efficiency and yield of different tools require careful study. Accurate and robust methods to detect fraudulent papers might prevent their publication if applied at the peer review stage or, at least, should enable shorter retraction times, which is specially relevant considering the longer time-to-retraction for NIH-funded studies. Moreover, it should be acknowledged that many retractions reflect honest errors and their authors who detect them and withdraw their flawed work from the literature should be congratulated for their diligence and honesty. Creating a culture where honest correction or error is rewarded rather than leading to reputational damage is warranted [@fanelli2018; @hosseini2018; @fanelli2016]. Currently, most retractions probably reflect poor research practices and misconduct [@hwang2023], but the balance may change if more honest error retractions are incentivized.  
+
+Another important point is that only authors with more than one retracted article experienced a substantive short-term decrease in funding, although even in this subgroup most of them still retained at least some funding. One may debate whether and how the NIH could consider enforcing faster and stricter consequences for retracted authors, especially when the reasons for retractions are not due to honest errors, but to serious fraudulent practices such as data fabrication. "Super-retractor" authors with a large number of retractions may account for a sizeable share of total retractions [@lyu2026] and may be a particular group warranting more aggressive measures. Some of these authors may be highly-cited and may have a large negative impact on the literature [@ioannidis2025].
+
+Lastly, considering the fast pace in which the scientific literature is evolving, static reports quickly become obsolete. The dashboard accompanying this analysis (<https://sandovallentisco.shinyapps.io/nih-retractions/>) is automatically recomputed weekly from open data, so the estimates in this article will continue to refresh after publication. We encourage meta-scientists and policy researchers to also include living, automated analyses of research practices and research outcomes when possible.
+
+## Supplementary materials
+
+Detailed methods and additional analyses can be found at: <https://github.com/sandovallentisco/nih-retractions-cost>
+
+## Disclosures and data availability statement
+
+This study was preregistered on March 23, 2026, on OSF (<https://osf.io/guq59/>). All data and scripts can be found at <https://github.com/sandovallentisco/nih-retractions-cost>.
+
+## References
+
+::: {#refs}
+:::
