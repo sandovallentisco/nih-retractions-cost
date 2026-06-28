@@ -26,6 +26,8 @@ library(ggplot2)
 papers_file  <- "data/processed/FINAL_Retractions_Costs_and_Pubs.csv"
 authors_file <- "data/processed/Author_Funding_Matches.csv"
 cpi_file     <- "data/processed/annual_cpi.csv"
+collision_flags_file <- "data/processed/author_collision_flags.csv"  # built by build_collision_flags.R
+grant_keep_file      <- "data/processed/author_grant_keep.csv"       # built by build_collision_flags.R
 
 # Load CPI
 annual_cpi <- read_csv(cpi_file, show_col_types = FALSE)
@@ -58,6 +60,11 @@ df_authors <- read_csv(authors_file, show_col_types = FALSE) %>%
   distinct(Original_Author_Name, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
   left_join(annual_cpi, by = "Fiscal_Year") %>%
   mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier)
+
+# Name-collision flags (built by build_collision_flags.R); used in the consequences-correction
+# methods section below.
+collision_flags    <- read_csv(collision_flags_file, show_col_types = FALSE)
+n_collision_authors <- sum(collision_flags$n_pi_id > 1)
 
 # Key values for text
 Sys.setlocale("LC_TIME", "C")
@@ -93,8 +100,8 @@ meta_reasons <- c(
 # category; a paper may list several labels, so categories are not mutually exclusive and need
 # not cover every label. Procedural/administrative meta-reasons (above) are not included.
 reason_clusters <- list(
-  "Image duplication / manipulation"       = c("Duplication of/in Image", "Manipulation of Images", "Falsification/Fabrication of Image", "Concerns/Issues about Image", "Plagiarism of Image", "Unreliable Image"),
-  "Formal misconduct investigation"        = c("Investigation by Company/Institution", "Investigation by ORI", "Investigation by Third Party", "Misconduct - Official Investigation(s) and/or Finding(s)", "Misconduct by Author", "Falsification/Fabrication of Data", "Falsification/Fabrication of Results"),
+  "Data & image fabrication / manipulation" = c("Duplication of/in Image", "Manipulation of Images", "Falsification/Fabrication of Image", "Concerns/Issues about Image", "Plagiarism of Image", "Unreliable Image", "Falsification/Fabrication of Data", "Falsification/Fabrication of Results"),
+  "Formal misconduct investigation"        = c("Investigation by Company/Institution", "Investigation by ORI", "Investigation by Third Party", "Misconduct - Official Investigation(s) and/or Finding(s)", "Misconduct by Author"),
   "Reliability / reproducibility concerns" = c("Unreliable Results and/or Conclusions", "Unreliable Data", "Concerns/Issues about Data", "Concerns/Issues about Results and/or Conclusions", "Results Not Reproducible", "Original Data and/or Images not Provided and/or not Available"),
   "Plagiarism / duplicate publication"     = c("Plagiarism of/in Article", "Plagiarism of Text", "Plagiarism of Data", "Duplication of/in Article", "Duplication of Text", "Euphemisms for Plagiarism", "Euphemisms for Duplication", "Duplication of Data"),
   "Honest error"                           = c("Error in Data", "Error in Analyses", "Error in Results and/or Conclusions", "Error in Methods", "Error in Image"),
@@ -147,7 +154,7 @@ dashboard_theme <- theme_classic(base_size = 18) +
 
 First, we retrieved the latest version of the Retraction Watch Database (RWD) from the Crossref repository (<https://gitlab.com/crossref/retraction-watch-data>). We only considered entries marked as retractions and not expressions of concern or corrections. We also excluded entries classified as 'Retract and Replace', which indicates that a paper was retracted but subsequently replaced by a corrected version, as this implies the work only contained remediable errors and remains valid in the literature. Additionally, we omitted retractions that did not represent a high likelihood of serious error and/or misconduct by the authors (e.g., administrative or publisher errors), filtering out entries classified as 'Error by Journal/Publisher', 'Duplicate Publication through Error by Journal/Publisher', or 'Withdrawn (out of date)' provided these were not accompanied by additional reasons suggesting author fault.
 
-For those eligible retracted articles for which RWD identified an institutional affiliation within the U.S., we used a custom Python script to automate the retrieval of supplementary funding metadata. This script queried PubMed using the National Center for Biotechnology Information (NCBI) Entrez API to get funding information (grant IDs and and the total number of publications under each grant). We judged the accuracy of PubMed NIH funding information to be good, with very few missing grants (see more details in the next section). In fact, PubMed sometimes captured more grants than were explicitly reported in the article text, which reflects the fact that PubMed also incorporates grant–publication associations from sources beyond the manuscript itself. For example, through the NIH's My NCBI / My Bibliography system, where investigators link their accounts to eRA Commons and associate their publications with active grants for routine bibliography management and when preparing annual progress reports (RPPRs). Additional grant information can come from publisher deposits, the NIH Manuscript Submission System (NIHMS), and NLM's own text mining and indexing processes. Together, these mechanisms can capture official funding support even when authors inadvertently omitted the grant numbers from the manuscript's acknowledgments section (see more details about accuracy assessment in Supplementary Materials). Finally, to retrieve the funding amount associated with a grant, we used the NIH Research Portfolio Online Reporting Tools Expenditure and Results (RePORTER) tool. Databases from all available fiscal years were downloaded using the ExPORTER tool. Grant IDs were searched within these databases, extracting the funding amount associated with each one.
+For those eligible retracted articles for which RWD identified an institutional affiliation within the U.S., we used a custom Python script to automate the retrieval of supplementary funding metadata. This script queried PubMed using the National Center for Biotechnology Information (NCBI) Entrez API to get funding information (grant IDs and and the total number of publications under each grant). We judged the accuracy of PubMed NIH funding information to be good, with very few missing grants (see more details in the next section). In fact, PubMed sometimes captured more grants than were explicitly reported in the article text, which reflects the fact that PubMed also incorporates grant–publication associations from sources beyond the manuscript itself. For example, through the NIH's My NCBI / My Bibliography system, where investigators link their accounts to eRA Commons and associate their publications with active grants for routine bibliography management and when preparing annual progress reports (RPPRs). Additional grant information might come from publisher deposits, the NIH Manuscript Submission System (NIHMS), and NLM's own text mining and indexing processes. Together, these mechanisms can capture official funding support even when authors inadvertently omitted the grant numbers from the manuscript's acknowledgments section. Finally, to retrieve the funding amount associated with a grant, we used the NIH Research Portfolio Online Reporting Tools Expenditure and Results (RePORTER) tool. Databases from all available fiscal years were downloaded using the ExPORTER tool. Grant IDs were searched within these databases, extracting the funding amount associated with each one.
 
 ## Examining the accuracy of PubMed NIH funding information
 
@@ -159,7 +166,7 @@ After examining this sample, we wanted to determine if PubMed might have poorer 
 
 In all cases within this new sample (both before and after 2005), whenever PubMed did not retrieve a grant ID it was because, correctly, no grant ID had been reported in the article either. For the subset of articles published before 2005, PubMed identified at least one NIH grant in 37 entries. Upon inspecting these grants, out of a total of 77 NIH grants IDs that were retrieved by PubMed/74 NIH grants IDs that were explicitly reported in the articles, a total of 6 grants could not be found in RePORTER. Two of these cases not found in RePORTER were published before 1985, which could explain this omission, as RePORTER data only goes back to 1985. In the remaining entries with funding, discrepancies between the number of NIH grant IDs retrieved by PubMed and those reported in the articles were found in only two cases; one because a grant ID was duplicated and in the other cases 2 grant IDs not reported in the text were present in PubMed. After inspecting these cases, we believe it may be a PubMed error since the Fiscal Year was later than the publication of the article. To control these types of potential errors, we will exclude grant IDs with fiscal years that post-date the article's publication.
 
-For the subset of articles published after 2005, PubMed retrieved some NIH funding for 21 entries. For these 20 entries, PubMed retrieved a total of 90 NIH grant IDs, while only 43 were reported in the articles. 24 of these discrepancies were due to duplicate grant IDs, an issue easily resolved by deduplicating as previously mentioned. Most of the remaining 23 discrepancies stem from a case where the article only reports 'This work was supported by National Institutes of Health grants' yet PubMed retrieves 14 NIH grant IDs, all of which are linked to one of the authors; we therefore consider this a case where PubMed was more comprehensive than the article itself. Of the remaining 9 discrepant NIH grant IDs, 7 of the grant IDs were also linked to one of the authors, and the other appears to be a PubMed error assigning two placeholder grant IDs (NIA NIH HHS (R99 AG999999); Intramural NIH HHS (Z99 AG999999)), not found in RePORTER. In sum, most discrepancies are due to duplicates that can be resolved or NIH grant IDs that were not reported in the article but are linked to the authors. Spreadsheets with the selected and inspected samples can be found in the ‘Supplementary Materials’ folder of the OSF registration as ‘sample_1.xlsx’ and ‘sample_2.xlsx’ at (<https://osf.io/guq59/>).
+For the subset of articles published after 2005, PubMed retrieved some NIH funding for 21 entries. For these entries, PubMed retrieved a total of 90 NIH grant IDs, while only 43 were reported in the articles. 24 of these discrepancies were due to duplicate grant IDs, an issue easily resolved by deduplicating as previously mentioned. Most of the remaining 23 discrepancies stem from a case where the article only reports 'This work was supported by National Institutes of Health grants' yet PubMed retrieves 14 NIH grant IDs, all of which are linked to one of the authors; we therefore consider this a case where PubMed was more comprehensive than the article itself. Of the remaining 9 discrepant NIH grant IDs, 7 of the grant IDs were also linked to one of the authors, and the other appears to be a PubMed error assigning two placeholder grant IDs (NIA NIH HHS (R99 AG999999); Intramural NIH HHS (Z99 AG999999)), not found in RePORTER. In sum, most discrepancies are due to duplicates that can be resolved or NIH grant IDs that were not reported in the article but are linked to the authors. Spreadsheets with the selected and inspected samples can be found in the ‘Supplementary Materials’ folder of the OSF registration as ‘sample_1.xlsx’ and ‘sample_2.xlsx’ at (<https://osf.io/guq59/>).
 
 ## Automated "Living" Analysis Pipeline
 
@@ -167,9 +174,9 @@ To ensure the findings remain current ("living analysis"), the entire data retri
 
 ## Estimating the direct cost of NIH-funded retracted articles
 
-We quantify the direct cost in different ways. First, we calculate the *attributed cost* dividing each grant total award by the number of publications produced under that grant and assigns the corresponding share to the retracted paper. This represents the fraction of the grant money that produced a specific retracted paper. We also calculated the money directly awarded to researchers (i.e., excluding institutional center and infrastructure grants). For this, we first calculate the total award of unique grants (de-duplicating repeated grants to without double-counting). Then, to separate grants awarded to an investigator from those awarded to an institution, we use the NIH activity code (e.g., R01, P30, U01). This code is present in the raw 'Funding_Info' text (e.g., NCI NIH HHS (R01 CA203737)) in FINAL_Retractions_Costs_and_Pubs.csv. We extract it with a regular expression that captures the three components of a grant number (i.e., activity code, Institute/Center abbreviation, and serial number) allowing the activity code to be either separated from or concatenated with the ID (e.g., U19AI057229, 5P50CA101942). For grants whose code is not recoverable from 'Funding_Info', we fall back to the full grant numbers stored in the author–funding file (field 'Grant_ID', e.g., K08HL086671, in Author_Funding_Matches.csv). Together these sources assign an activity code to approximately 95% of the unique-grant dollars.
+We quantify the direct cost in different ways. First, we calculate the *attributed cost* dividing each grant total award by the number of publications produced under that grant and assigns the corresponding share to the retracted paper. This represents the fraction of the grant money that produced a specific retracted paper. We also calculated the money associated with retracted papers directly awarded to researchers in personal grants (i.e., excluding institutional center and infrastructure grants). For this, we first calculate the total award of unique grants (de-duplicating repeated grants to prevent double-counting). Then, to separate grants awarded to an investigator from those awarded to an institution, we use the NIH activity code (e.g., R01, P30, U01). This code is present in the raw 'Funding_Info' text (e.g., NCI NIH HHS (R01 CA203737)) in FINAL_Retractions_Costs_and_Pubs.csv. We extract it with a regular expression that captures the three components of a grant number (i.e., activity code, Institute/Center abbreviation, and serial number) allowing the activity code to be either separated from or concatenated with the ID (e.g., U19AI057229, 5P50CA101942). For grants whose code is not recoverable from 'Funding_Info', we fall back to the full grant numbers stored in the author–funding file (field 'Grant_ID', e.g., K08HL086671, in Author_Funding_Matches.csv). Together these sources assign an activity code to approximately 95% of the unique-grant dollars.
 
-We label a grant as directly awarded to the investigator ("personal") if its activity code is a research, career-development, or fellowship grant (i.e., codes beginning with R, K or F) or one of the NIH Director's high-risk personal awards (DP1 Pioneer, DP2 New Innovator, DP5 Early Independence). Within the R-, K- and F-series we exclude mechanisms that are not awarded to fund an individual investigator's own research, namely institutional career/training mechanisms (K12, KL2), SBIR/STTR awards to companies (R41–R44), and institutional R-series mechanisms — resource grants (R24), education grants (R25), and linked/roadmap awards (RL1). All remaining mechanisms are treated as institutional: center grants (P30, P50, P20, P60, P40, P51, P41), clinical-research centers (M01, UL1), institutional training grants (T-series), shared instrumentation and construction (S10, G-, C06), cooperative agreements (U01, U54, U2C, U19, …; we exclude U01 because, although some fund a single investigator, others are large multi-site consortia that behave more like program or institutional grants), and resource grants from the former National Center for Research Resources (Institute/Center code "RR"). Program-project grants (P01) span several sub-projects and cores across multiple investigators and are treated as institutional here. Grants whose activity code could not be recovered are conservatively not counted as personal.
+We label a grant as directly awarded to the investigator ("personal") if its activity code is a research, career-development, or fellowship grant (i.e., codes beginning with R, K or F) or one of the NIH Director's high-risk personal awards (DP1 Pioneer, DP2 New Innovator, DP5 Early Independence). Within the R-, K- and F-series we exclude mechanisms that are not awarded to fund an individual investigator's own research, namely institutional career/training mechanisms (K12, KL2), SBIR/STTR awards to companies (R41–R44), and institutional R-series mechanisms; resource grants (R24), education grants (R25), and linked research project awards (RL1). All remaining mechanisms are treated as institutional: center grants (P30, P50, P20, P60, P40, P51, P41), clinical-research centers (M01, UL1), institutional training grants (T-series), shared instrumentation and construction (S10, G-, C06), cooperative agreements (U01, U54, U2C, U19, …; we exclude U01 because, although some fund a single investigator, others are large multi-site consortia that behave more like program or institutional grants), and resource grants from the former National Center for Research Resources (Institute/Center code "RR"). Program-project grants (P01) span several sub-projects and cores across multiple investigators and are treated as institutional here. Grants whose activity code could not be recovered are conservatively not counted as personal.
 
 ### Inflation adjustment
 
@@ -231,9 +238,153 @@ total_cost_personal_adj <- sum((grants_typed$gcost * grants_typed$mult)[grants_t
 pct_personal_of_grants  <- total_cost_personal / total_cost_unique_grants * 100
 ```
 
-Applied to the current data, the `r comma(n_unique_grants)` distinct NIH grants behind U.S. retracted papers carry a combined award of `r dollar_short(total_cost_unique_grants)` in nominal dollars. Restricting to grants awarded directly to the investigators (R-, K- and F-series and U01) leaves `r dollar_short(total_cost_personal)` in nominal dollars (`r dollar_short(total_cost_personal_adj)` in `r cpi_year` dollars), i.e. `r sprintf("%.0f%%", pct_personal_of_grants)` of the unique-grant total; the remainder is institutional center and infrastructure funding.
+## Same name correction in the author-consequences analysis
+
+The consequences analysis (Figure 1 of the main text) follows individual authors' NIH funding across the retraction event. Authors are linked to their NIH grant histories by name, which is reliable for distinctive names but ambiguous for common ones. When a name matches the grant records of several different investigators who happen to share that name, the funding attributed to a retracted author is partly, or entirely, another person's, which inflates the per-author funding trajectories and can bias the pre/post change.
+
+To address this, we used the NIH ExPORTER project files, in which every project lists the unique person identifiers (`PI_IDS`) and awardee institution (`ORG_NAME`) of its principal investigator(s). For each retracted author we collected the distinct `PI_IDS` that their name maps to across all of their attributed grants. When the name maps to a single `PI_ID`, every attributed grant belongs to the same person and the link is unambiguous. However, when it maps to more than one `PI_ID`, the attributed grant history pools two or more different investigators who happen to share that name, a situation we call a "collision".
+
+To identify whether any of the attributed funding can be tied to the real retracted researcher, we used institutional affiliation. For each attributed grant we compared its awardee institution (`ORG_NAME`) against the institution listed on the author's retracted paper. Institutions were matched leniently: each string was upper-cased and reduced to its distinctive tokens (words longer than three characters, excluding generic terms such as "university", "hospital" or "center"), and a grant was deemed to match the paper when the two shared at least one such token (e.g. the paper affiliation "Dana-Farber Cancer Institute, Harvard Medical School" matches the grant awardee "DANA-FARBER CANCER INSTITUTE").
+
+We then used this match to clean the attribution at the level of individual grants rather than whole authors. For each collision author we identified the real person's `PI_ID`(s) as those holding at least one institution-matching grant, and retained only the grants belonging to that `PI_ID`, discarding the grants of the same-named others. Because a `PI_ID` is stable when a researcher changes institution, this keeps the real author's entire funding trajectory, including grants they later held at other institutions; matching grants by institution alone would instead penalise legitimate institution moves. Authors whose name does not collide keep all of their grants. A collision author with no institution-matching grant has no identifiable real `PI_ID`, contributes no attributable funding, and therefore leaves the cohort. This grant-level correction is the one used in the main text.
+
+```{r collision-sensitivity}
+# Reproduce the consequences cohort (matching policy_analysis.qmd) and compute the pre/post
+# statistics under three collision-handling rules, to show how the result depends on the
+# correction. Flags/keep tables come from build_collision_flags.R (see provenance there).
+ca <- read_csv(authors_file, show_col_types = FALSE)
+ca_ret <- ca %>% group_by(Original_Author_Name) %>%
+  summarise(First_Retraction_Year = min(Retraction_Year, na.rm = TRUE), .groups = "drop")
+grant_keep <- read_csv(grant_keep_file, show_col_types = FALSE)
+cutoff <- max(ca$Fiscal_Year, na.rm = TRUE) - 3
+
+# Build the consequences cohort; optionally apply the grant-level PI_ID collision filter.
+make_cohort <- function(grant_filter = FALSE) {
+  d <- ca %>% left_join(ca_ret, by = "Original_Author_Name") %>%
+    mutate(diff_retracted = Fiscal_Year - First_Retraction_Year)
+  if (grant_filter) d <- d %>% left_join(grant_keep, by = c("Original_Author_Name", "Grant_ID")) %>%
+    filter(coalesce(keep_consequences, TRUE))
+  d %>% distinct(Original_Author_Name, First_Retraction_Year, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
+    left_join(annual_cpi, by = "Fiscal_Year") %>%
+    mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier) %>%
+    filter(First_Retraction_Year <= cutoff)
+}
+ca_cohort    <- make_cohort(FALSE)   # no correction
+ca_cohort_gl <- make_cohort(TRUE)    # grant-level PI_ID filter (main)
+
+coll_stat <- function(coh) {
+  pd <- coh %>% filter(diff_retracted >= -3 & diff_retracted <= 3 & diff_retracted != 0) %>%
+    mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>%
+    group_by(Original_Author_Name, Period) %>%
+    summarise(AF = sum(Funding_Adjusted, na.rm = TRUE) / 3, .groups = "drop") %>%
+    pivot_wider(names_from = Period, values_from = AF, values_fill = 0)
+  full <- coh %>% distinct(Original_Author_Name) %>% left_join(pd, by = "Original_Author_Name") %>%
+    mutate(across(c(Pre, Post), ~ ifelse(is.na(.x), 0, .x)))
+  p <- wilcox.test(full$Pre, full$Post, paired = TRUE, exact = FALSE)$p.value
+  tibble(N = nrow(full), Pre = median(full$Pre), Post = median(full$Post),
+         Pct = (median(full$Post) - median(full$Pre)) / median(full$Pre) * 100,
+         p = p, Lost = sum(full$Pre > 0 & full$Post == 0) / sum(full$Pre > 0) * 100)
+}
+coll_sens <- bind_rows(
+  coll_stat(ca_cohort)    %>% mutate(Specification = "Full cohort (no correction)"),
+  coll_stat(ca_cohort_gl) %>% mutate(Specification = "Grant-level by PI_ID (main analysis)")
+)
+fmt_p2 <- function(p) ifelse(p < 0.001, "< 0.001", sprintf("%.3f", p))
+coll_sens %>%
+  transmute(Specification, `Authors (N)` = comma(N),
+            `Median pre` = dollar(Pre, accuracy = 1), `Median post` = dollar(Post, accuracy = 1),
+            `Change` = sprintf("%+.1f%%", Pct), `Wilcoxon p` = fmt_p2(p),
+            `Lost all funding` = sprintf("%.1f%%", Lost)) %>%
+  knitr::kable(align = "lrrrrrr",
+    caption = "Sensitivity of the author-consequences result to name-collision handling. 'Change' is the percentage change in the cohort-wide median per-author annual NIH funding from the three pre-retraction to the three post-retraction years; the Wilcoxon p-value is from the paired signed-rank test; 'Lost all funding' is the share of previously funded authors with no NIH funding in the post window. The grant-level PI_ID rule is used in the main text.")
+```
+
+The two rows contrast the uncorrected cohort with the grant-level `PI_ID` correction used in the main analysis. Without correction, the attributed funding still pools same-named investigators, whose large, persistent portfolios dilute the decline to about `r sprintf("%.0f%%", abs(coll_sens$Pct[1]))`. The grant-level `PI_ID` rule isolates each real author's own grants—for an author whose name matches several investigators, keeping only the grants of the one whose awardee institution matches their retracted paper—after which the cohort-wide median annual funding falls by about `r sprintf("%.0f%%", abs(coll_sens$Pct[2]))` (paired Wilcoxon p = `r fmt_p2(coll_sens$p[2])`), a decline that, unlike the uncorrected cohort, reaches statistical significance. The magnitude of the decline is thus sensitive to how name collisions are handled, and the headline figure should be read with that caveat; the direction, i.e., a substantial post-retraction decline in the funding genuinely attributable to retracted authors, holds once the attribution is cleaned.
 
 ## Supplementary Results
+
+### Distribution of per-author funding
+
+The corrected cohort-wide median falls by about `r sprintf("%.0f%%", abs(coll_sens$Pct[2]))`, but this reflects mainly an increase in the share of authors with no NIH funding rather than a uniform reduction across the cohort. The figure below shows the per-author annual funding before and after retraction. For the full cohort the two distributions, and their means, are very similar; the change is concentrated in the median. For authors with more than one retracted paper, the whole distribution, including the mean, shifts downward.
+
+```{r fig.cap="Distribution of per-author annual NIH funding in the three years before (green) and after (orange) retraction, after the grant-level collision correction, for authors with non-zero funding (kernel density on a log scale; zero-funding authors are omitted from the curve but their share is annotated in each panel).", fig.height=5, fig.width=12, dpi=300}
+# Per-author pre/post annual funding (grant-level cohort), for the full cohort and the
+# >1-retraction subgroup. Density of FUNDED authors on a log scale, with the median (solid)
+# and mean (dashed) of each period as vertical lines, and the share at zero annotated. Built
+# on ca / ca_cohort_gl from the collision-sensitivity chunk above.
+.num_ret <- ca %>% group_by(Original_Author_Name) %>% summarise(Num = n_distinct(Record_ID), .groups = "drop")
+.pp <- ca_cohort_gl %>%
+  filter(diff_retracted >= -3, diff_retracted <= 3, diff_retracted != 0) %>%
+  mutate(Period = ifelse(diff_retracted < 0, "Pre", "Post")) %>%
+  group_by(Original_Author_Name, Period) %>%
+  summarise(AF = sum(Funding_Adjusted, na.rm = TRUE) / 3, .groups = "drop") %>%
+  pivot_wider(names_from = Period, values_from = AF, values_fill = 0)
+.auth <- ca_cohort_gl %>% distinct(Original_Author_Name) %>%
+  left_join(.pp, by = "Original_Author_Name") %>%
+  mutate(across(c(Pre, Post), ~ coalesce(.x, 0))) %>%
+  left_join(.num_ret, by = "Original_Author_Name")
+.gl1 <- sprintf("All retracted authors (N = %s)", comma(nrow(.auth)))
+.gl2 <- sprintf("Authors with >1 retracted paper (N = %s)", comma(sum(.auth$Num > 1)))
+.dens <- bind_rows(.auth %>% mutate(Group = .gl1),
+                   .auth %>% filter(Num > 1) %>% mutate(Group = .gl2)) %>%
+  mutate(Group = factor(Group, levels = c(.gl1, .gl2))) %>%
+  pivot_longer(c(Pre, Post), names_to = "Period", values_to = "Funding") %>%
+  mutate(Period = factor(Period, levels = c("Pre", "Post"),
+                         labels = c("Pre-retraction", "Post-retraction")))
+.stats <- .dens %>% group_by(Group, Period) %>%
+  summarise(med = median(Funding), mn = mean(Funding), .groups = "drop") %>%
+  mutate(lmed = log10(med), lmn = log10(mn))
+# Long form so line type (median = solid, mean = dashed) can be mapped to a legend.
+.lines <- .stats %>% select(Group, Period, Median = lmed, Mean = lmn) %>%
+  pivot_longer(c(Median, Mean), names_to = "Stat", values_to = "lx") %>%
+  mutate(Stat = factor(Stat, levels = c("Median", "Mean")))
+# Value labels for the lines, kept only where a label does not overlap another (>0.16 in log10).
+.lbl <- function(x) ifelse(x >= 1e6, paste0("$", round(x / 1e6, 1), "M"), paste0("$", round(x / 1e3), "K"))
+.vlab <- .stats %>% select(Group, Period, Median = med, Mean = mn) %>%
+  pivot_longer(c(Median, Mean), names_to = "Stat", values_to = "val") %>%
+  mutate(lx = log10(val), txt = .lbl(val)) %>%
+  group_by(Group) %>%
+  mutate(keep = vapply(seq_along(lx), function(i) min(abs(lx[-i] - lx[i])) > 0.16, logical(1))) %>%
+  ungroup() %>% filter(keep)
+.zlab <- .dens %>% group_by(Group, Period) %>% summarise(pz = mean(Funding == 0) * 100, .groups = "drop") %>%
+  pivot_wider(names_from = Period, values_from = pz) %>%
+  mutate(lab = sprintf("$0 funding: %.0f%% pre, %.0f%% post", `Pre-retraction`, `Post-retraction`))
+.fcols <- c("Pre-retraction" = "#00716f", "Post-retraction" = "#d16b2a")
+# Reserve a clean band at the top of each panel for the annotations: cap the median/mean
+# reference lines just below it (geom_segment instead of a full-height geom_vline) so that no
+# label ($0-funding share or the $-value labels) ever sits on top of a line. The y-scale is
+# shared across facets, so a single global density peak determines the band.
+.ymax <- max(ggplot_build(
+  ggplot(.dens %>% filter(Funding > 0) %>% mutate(lF = log10(Funding)),
+         aes(lF, color = Period)) + geom_density(adjust = 1.1) + facet_wrap(~ Group)
+)$data[[1]]$y, na.rm = TRUE)
+.lines <- .lines %>% mutate(y0 = 0, y1 = .ymax * 0.82)   # lines stop below the label band
+.vlab  <- .vlab  %>% mutate(yt = .ymax * 1.00)           # $-value labels: top row
+.zlab  <- .zlab  %>% mutate(yt = .ymax * 0.90)           # $0-funding share: row just below
+ggplot(.dens %>% filter(Funding > 0) %>% mutate(lF = log10(Funding)),
+       aes(lF, fill = Period, color = Period)) +
+  geom_density(alpha = 0.28, linewidth = 0.7, adjust = 1.1) +
+  geom_segment(data = .lines, aes(x = lx, xend = lx, y = y0, yend = y1, color = Period, linetype = Stat),
+               linewidth = 0.9, inherit.aes = FALSE) +
+  geom_text(data = .vlab, aes(x = lx, y = yt, label = txt, color = Period), inherit.aes = FALSE,
+            vjust = 1, size = 3.6, show.legend = FALSE) +
+  geom_text(data = .zlab, aes(x = log10(1100), y = yt, label = lab), inherit.aes = FALSE,
+            hjust = 0, vjust = 1, size = 3.8, color = "gray35") +
+  scale_x_continuous(breaks = log10(c(1e3, 1e4, 1e5, 1e6, 1e7)),
+                     labels = c("$1K", "$10K", "$100K", "$1M", "$10M")) +
+  scale_fill_manual(values = .fcols) + scale_color_manual(values = .fcols) +
+  scale_linetype_manual(values = c("Median" = "solid", "Mean" = "dashed")) +
+  guides(fill = guide_legend(override.aes = list(linetype = 0)),
+         color = "none",
+         linetype = guide_legend(override.aes = list(color = "gray30"))) +
+  coord_cartesian(xlim = log10(c(900, 2e7))) +
+  facet_wrap(~ Group) +
+  labs(x = "Annual NIH funding per author (log scale)", y = "Density",
+       fill = NULL, color = NULL, linetype = NULL) +
+  dashboard_theme +
+  theme(legend.position = "top", strip.background = element_blank(),
+        strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+```
 
 ```{r fig.cap="Retraction reasons by funding source, grouped into broad categories.", fig.height=4.5, fig.width=12, dpi=300}
 # Map each raw reason label to its broad category (reason_clusters, defined in setup) so this
@@ -273,7 +424,7 @@ print(p_reasons)
 
 ## Top retraction reasons by funding source and time-to-retraction
 
-NIH-funded and non-NIH-funded retracted papers differ systematically in why they are retracted, and these reasons differ in how quickly they are acted on, which accounts for much of the longer time-to-retraction of NIH-funded papers reported in the main analysis. NIH-funded papers are concentrated in image-integrity and formal-misconduct cases (e.g., data fabrication), which surface late (through image forensics and institutional or ORI investigations) and take years to resolve; non-NIH papers are more often retracted for plagiarism and paper mills, which are acted on much faster. The table below shows, for each broad reason category, the share of papers in each funding group whose retraction notice lists such a reason, together with the median time-to-retraction for papers with that reason.
+NIH-funded and non-NIH-funded retracted papers differ systematically in why they are retracted, and these reasons differ in how quickly they are acted on, which accounts for much of the longer time-to-retraction of NIH-funded papers reported in the main analysis. NIH-funded papers are concentrated in data- and image-fabrication/manipulation and in formal misconduct investigations, which surface late (through image forensics and institutional or ORI investigations) and take years to resolve; non-NIH papers are more often retracted for plagiarism and paper mills, which are acted on much faster. The table below shows, for each broad reason category, the share of papers in each funding group whose retraction notice lists such a reason, together with the median time-to-retraction for papers with that reason.
 
 ```{r}
 dpf <- df_papers %>%
@@ -309,9 +460,9 @@ knitr::kable(reason_tbl, align = c("l", "r", "r", "r"),
 
 The categories are our own aggregations of the raw Retraction Watch Database reason labels, grouping the most frequent substantive reasons into six broad mechanisms. Because a single retraction notice can list several labels, the categories are not mutually exclusive; and because the database uses many fine-grained labels, the categories do not capture every label; some substantive labels (e.g., research-ethics and consent, authorship, or referencing/attribution issues) fall outside the six categories. Procedural and administrative reasons (e.g., Investigation by Journal/Publisher) and notice-status labels (Notice – Limited or No Information; Date of Article and/or Notice Unknown; Upgrade/Update of Prior Notice(s); Removed; Notice – Unable to Access via current resources) are not included, as they describe the retraction process or notice status rather than a substantive cause. 
 
-Each category groups the following raw labels — *Image duplication / manipulation*: Duplication of/in Image; Manipulation of Images; Falsification/Fabrication of Image; Concerns/Issues about Image; Plagiarism of Image; Unreliable Image. *Formal misconduct investigation*: Investigation by Company/Institution; Investigation by ORI; Investigation by Third Party; Misconduct - Official Investigation(s) and/or Finding(s); Misconduct by Author; Falsification/Fabrication of Data; Falsification/Fabrication of Results. *Reliability / reproducibility concerns*: Unreliable Results and/or Conclusions; Unreliable Data; Concerns/Issues about Data; Concerns/Issues about Results and/or Conclusions; Results Not Reproducible; Original Data and/or Images not Provided and/or not Available. *Plagiarism / duplicate publication*: Plagiarism of/in Article; Plagiarism of Text; Plagiarism of Data; Duplication of/in Article; Duplication of Text; Euphemisms for Plagiarism; Euphemisms for Duplication; Duplication of Data. *Honest error*: Error in Data; Error in Analyses; Error in Results and/or Conclusions; Error in Methods; Error in Image. *Paper mill / compromised peer review / AI generated content*: Compromised Peer Review; Concerns/Issues about Peer Review; Paper Mill; False/Forged Authorship; False/Forged Affiliation; Computer-Aided Content or Computer-Generated Content.
+Each category groups the following raw labels — *Data & image fabrication / manipulation*: Duplication of/in Image; Manipulation of Images; Falsification/Fabrication of Image; Concerns/Issues about Image; Plagiarism of Image; Unreliable Image; Falsification/Fabrication of Data; Falsification/Fabrication of Results. *Formal misconduct investigation*: Investigation by Company/Institution; Investigation by ORI; Investigation by Third Party; Misconduct - Official Investigation(s) and/or Finding(s); Misconduct by Author. *Reliability / reproducibility concerns*: Unreliable Results and/or Conclusions; Unreliable Data; Concerns/Issues about Data; Concerns/Issues about Results and/or Conclusions; Results Not Reproducible; Original Data and/or Images not Provided and/or not Available. *Plagiarism / duplicate publication*: Plagiarism of/in Article; Plagiarism of Text; Plagiarism of Data; Duplication of/in Article; Duplication of Text; Euphemisms for Plagiarism; Euphemisms for Duplication; Duplication of Data. *Honest error*: Error in Data; Error in Analyses; Error in Results and/or Conclusions; Error in Methods; Error in Image. *Paper mill / compromised peer review / AI generated content*: Compromised Peer Review; Concerns/Issues about Peer Review; Paper Mill; False/Forged Authorship; False/Forged Affiliation; Computer-Aided Content or Computer-Generated Content.
 
-Unlike the other categories, "Formal misconduct investigation" does not describe a specific defect of the paper but rather the procedural pathway through which the retraction was reached (i.e., a formal investigation by an institution, the ORI, or a third party). Accordingly, 79% of papers in this category also carry a label from at least one other category (most often image-integrity problems or reliability/reproducibility concerns). Because NIH-funded papers are routed through these formal investigations far more often than non-NIH papers, this slow institutional/ORI pathway accounts for a substantial part of their longer time-to-retraction.
+Unlike the other categories, "Formal misconduct investigation" does not describe a specific defect of the paper but rather the procedural pathway through which the retraction was reached (i.e., a formal investigation by an institution, the ORI, or a third party). Accordingly, 95% of papers in this category also carry a label from at least one other category (most often data/image fabrication or manipulation, or reliability/reproducibility concerns). Because NIH-funded papers are routed through these formal investigations far more often than non-NIH papers, this slow institutional/ORI pathway accounts for a substantial part of their longer time-to-retraction.
 
 ## Scientific domains and publishers of U.S. retracted articles
 

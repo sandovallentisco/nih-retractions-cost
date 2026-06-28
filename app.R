@@ -21,6 +21,7 @@ library(shinycssloaders)
 papers_file  <- "data/processed/FINAL_Retractions_Costs_and_Pubs.csv"
 authors_file <- "data/processed/Author_Funding_Matches.csv"
 cpi_file     <- "data/processed/annual_cpi.csv"
+grant_keep_file <- "data/processed/author_grant_keep.csv"  # built by build_collision_flags.R
 
 # --- ANNUAL CPI ---
 # Primary source: cached CSV produced by src/cpi_fetcher.py (quarterly cron).
@@ -98,11 +99,30 @@ author_retractions <- df_authors_raw %>%
   group_by(Original_Author_Name) %>%
   summarise(Num_Retractions = n_distinct(Record_ID), .groups = "drop")
 
+# Grant-level name-collision filter (built by build_collision_flags.R), matching the manuscript.
+# Common author names can match the grant records of several different NIH investigators; for an
+# author whose name collides with more than one investigator we keep only the grants belonging to
+# the real person's PI_ID (anchored by the institution on their retracted paper; PI_ID is stable
+# across institution moves) and drop grants held by same-named others. Non-collision authors keep
+# every grant. If the artefact is missing, fall back to no filtering so the app still runs.
+grant_keep <- tryCatch(read_csv(grant_keep_file, show_col_types = FALSE),
+                       error = function(e) NULL)
+
 df_authors <- df_authors_raw %>%
   group_by(Original_Author_Name) %>%
   mutate(First_Retraction_Year = min(Retraction_Year, na.rm = TRUE)) %>%
   ungroup() %>%
-  mutate(diff_retracted = Fiscal_Year - First_Retraction_Year) %>%
+  mutate(diff_retracted = Fiscal_Year - First_Retraction_Year)
+
+# Apply the grant-level collision filter (drop grants belonging to same-named other investigators)
+# before collapsing to distinct author-grant-year rows. Skipped if the artefact is unavailable.
+if (!is.null(grant_keep)) {
+  df_authors <- df_authors %>%
+    left_join(grant_keep, by = c("Original_Author_Name", "Grant_ID")) %>%
+    filter(coalesce(keep_consequences, TRUE))
+}
+
+df_authors <- df_authors %>%
   distinct(Original_Author_Name, First_Retraction_Year, Grant_ID, Fiscal_Year, Funding_Amount, diff_retracted) %>%
   left_join(annual_cpi, by = "Fiscal_Year") %>%
   mutate(Funding_Adjusted = Funding_Amount * Inflation_Multiplier) %>%
@@ -723,7 +743,7 @@ server <- function(input, output, session) {
   output$plot_avg_funding_note <- renderUI({
     fa <- filtered_authors()
     total_authors <- n_distinct(fa$Original_Author_Name)
-    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: For the cohort (", comma(total_authors), " authors), each box shows the distribution of the within-author change in annual NIH funding relative to the baseline year -3 (so year -3 is identically $0). Green boxes are the pre-retraction years (-3 to 0) and orange the post-retraction years (1 to 3); the box is the interquartile range, the centre line the median, the whiskers the 10th-90th percentiles, and the black line traces the mean change (the y-axis is fit to the whiskers). The per-author pre-vs-post medians and Wilcoxon signed-rank test reported in the statistics panel average each author's funding within the 3-year window and then take the median across the full cohort (authors with no funding contribute $0). To find the funding granted to retracted authors in the NIH RePORTER system, we used strict name matching (requiring an exact match of first, middle, and last names). This approach minimizes the possibility of false positives, but if an author was not found due to a name variation, they are treated as having $0 funding, making this a conservative estimate of the financial impact.</p>"))
+    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: For the cohort (", comma(total_authors), " authors), each box shows the distribution of the within-author change in annual NIH funding relative to the baseline year -3 (so year -3 is identically $0). Green boxes are the pre-retraction years (-3 to 0) and orange the post-retraction years (1 to 3); the box is the interquartile range, the centre line the median, the whiskers the 10th-90th percentiles, and the black line traces the mean change (the y-axis is fit to the whiskers). The per-author pre-vs-post medians and Wilcoxon signed-rank test reported in the statistics panel average each author's funding within the 3-year window and then take the median across the full cohort (authors with no funding contribute $0). To find the funding granted to retracted authors in the NIH RePORTER system, we used strict name matching (requiring an exact match of first, middle, and last names). This approach minimizes the possibility of false positives, but if an author was not found due to a name variation, they are treated as having $0 funding, making this a conservative estimate of the financial impact. For authors whose name nonetheless matches more than one NIH investigator, we keep only the grants of the investigator whose awardee institution matches their retracted paper (identified by NIH PI identifier), removing funding that belongs to same-named researchers, consistent with the manuscript.</p>"))
   })
   
   # --- Statistical tests ---

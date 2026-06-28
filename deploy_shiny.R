@@ -118,7 +118,8 @@ files <- c(
   "app.R",
   "data/processed/FINAL_Retractions_Costs_and_Pubs.csv",
   "data/processed/Author_Funding_Matches.csv",
-  "data/processed/annual_cpi.csv"
+  "data/processed/annual_cpi.csv",
+  "data/processed/author_grant_keep.csv"
 )
 
 missing <- files[!file.exists(files)]
