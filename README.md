@@ -30,8 +30,8 @@ pubmed_funding_project/
 |       +-- annual_cpi.csv                    # Yearly CPI and inflation multipliers (from src/cpi_fetcher.py)
 |       +-- author_collision_flags.csv        # Per-author name-collision flags        (built by build_collision_flags.R)
 |       +-- author_grant_keep.csv             # Per (author, grant) keep flag for the correction (built by build_collision_flags.R)
-|       +-- (intermediate CSVs: retraction_watch_with_funding.csv, FINAL_Retractions_Analyzed.csv,
-|           FINAL_Retractions_with_Costs.csv, Cost_Summary_Table.csv, pubmed_cache.csv)
+|       +-- (intermediate CSVs: retraction_watch_with_funding.csv,
+|           FINAL_Retractions_with_Costs.csv, pubmed_cache.csv)
 |
 +-- src/                                      # Python data pipeline (steps 1-6)
 |   +-- config.py                             # Global paths and API credentials (read from .env)
