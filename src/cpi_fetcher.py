@@ -9,7 +9,7 @@
 #     The Shiny dashboard (``app.R``) historically pulled this series at
 #     startup via ``quantmod::getSymbols``. That call is a hard dependency
 #     on outbound network access from shinyapps.io and adds 1-3 seconds to
-#     every cold start. Persisting the series as part of the quarterly
+#     every cold start. Persisting the series as part of the weekly
 #     pipeline removes that dependency: the app simply reads a small CSV
 #     committed alongside the rest of ``data/processed``.
 #

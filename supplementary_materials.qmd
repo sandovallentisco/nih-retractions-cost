@@ -36,7 +36,10 @@ if (!"Inflation_Multiplier" %in% colnames(annual_cpi)) {
   annual_cpi$Inflation_Multiplier <- current_cpi / annual_cpi$CPI
 }
 
-# Load Papers
+# Load Papers (one row per retracted article). Parse the publication/retraction years and
+# the lag between them, compute each paper's attributed NIH cost (its grants' total cost
+# divided by the number of publications those grants produced), and join the CPI table to
+# express that cost in current (cpi_year) dollars. Mirrors the loader in policy_analysis.qmd.
 df_papers <- read_csv(papers_file, show_col_types = FALSE) %>%
   mutate(
     Publication_Year = as.numeric(str_extract(OriginalPaperDate, "(?<=/)\\d{4}")),
@@ -108,18 +111,21 @@ reason_clusters <- list(
   "Paper mill / compromised peer review / AI generated content" = c("Compromised Peer Review", "Concerns/Issues about Peer Review", "Paper Mill", "False/Forged Authorship", "False/Forged Affiliation", "Computer-Aided Content or Computer-Generated Content")
 )
 
-# Reasons
+# Three most frequent raw retraction-reason labels (excluding the procedural meta-reasons),
+# split from the ";"-separated Reason field, for inline reporting in the text.
 reasons_data <- df_papers %>% drop_na(Reason) %>% separate_rows(Reason, sep = ";") %>%
   mutate(Reason = str_trim(Reason)) %>% filter(Reason != "", !Reason %in% meta_reasons)
 top_reasons <- reasons_data %>% count(Reason, sort = TRUE) %>% slice_head(n = 3) %>% pull(Reason)
 top_reasons_str <- paste(top_reasons, collapse = ", ")
 
-# Publishers
+# Three most frequent publishers (raw, ungrouped) for inline reporting.
 publishers_data <- df_papers %>% drop_na(Publisher) %>% mutate(Publisher = str_trim(Publisher)) %>% filter(Publisher != "")
 top_publishers <- publishers_data %>% count(Publisher, sort = TRUE) %>% slice_head(n = 3) %>% pull(Publisher)
 top_publishers_str <- paste(top_publishers, collapse = ", ")
 
-# Impact calculations
+# Cohort-wide average funding pre vs post retraction, used for a headline value in the text.
+# (A simple, uncorrected timeline average; the collision-corrected per-author analysis and its
+# figure are computed later, in the "Distribution of per-author funding" chunk below.)
 total_cohort_authors <- n_distinct(df_authors$Original_Author_Name)
 tl <- df_authors %>% filter(diff_retracted >= -3 & diff_retracted <= 3) %>%
   group_by(diff_retracted) %>%
@@ -160,11 +166,11 @@ For those eligible retracted articles for which RWD identified an institutional 
 
 To assess the accuracy of the retrieved NIH funding data, we qualitatively compared the funding and acknowledgement sections of the first entries (i.e., the most recent entries) from the Retraction Watch Database (RWD) (version retrieved in December 2025) with the information from PubMed. This way, we inspected a total of 123 entries for which there was an associated PubMed ID. Using this sample, we detected that while reported grants from non-NIH funding bodies were frequently missing from the PubMed metadata, NIH grants reported in the articles were correctly included in PubMed in all but two cases (i.e., 2 out of the 45 entries for which some NIH funding was reported). In the first case, all four grants reported in the full text were missing because they were incorrectly disclosed within the Conflict of Interest (COI) section rather than the funding/acknowledgment sections. In the second case, one out of three reported grants was not retrieved, likely missed by the PubMed indexing algorithm due to non-standard reporting formats (it was reported as R 56-139561 instead of R56 HL139561). To mitigate problems arising from misplaced disclosures like in the first case, we also retrieved information about COIs to identify potential grant IDs. In the remaining 78 cases, PubMed did not retrieve any NIH grants because, correctly, no NIH funding had been reported. Nonetheless, because PubMed began indexing COI statements systematically only in 2017 (U.S. National Library of Medicine, 2017), earlier articles may still be subject to missing data.
 
-However, importantly, we also observed in this sample that, in 9 out of the 44 entries for which PubMed identified some NIH grant, the PubMed metadata yielded more NIH grant IDs than those explicitly reported in the article funding/acknowledgement sections. This discrepancy likely happened because PubMed/RePORTER also considers information from authors reported internally, e.g., information submitted to the My NCBI tool to fill in the NIH Research Performance Progress Report (RPPR). Therefore, even if authors failed to disclose funding in the article but submitted this information to other platforms, this information will be available in PubMed/RePORTER. For this reason, we believe that funding data provided by PubMed is more comprehensive than what is reported in the article. Additionally, we observed minor issues regarding duplicate entries, where the same grant appeared several times with varying formats—e.g., 'NCI NIH HHS (R01 CA138409)' and 'NCI NIH HHS (CA138409)', or 'P20RR 15635' and 'P20 RR015635'. To prevent double-counting, we implemented an automated cleaning of duplicates based on numeric suffix matching.
+However, importantly, we also observed in this sample that, in 9 out of the 44 entries for which PubMed identified some NIH grant, the PubMed metadata yielded more NIH grant IDs than those explicitly reported in the article funding/acknowledgement sections. This discrepancy likely happened because PubMed/RePORTER also considers information from authors reported internally, e.g., information submitted to the My NCBI tool to fill in the NIH Research Performance Progress Report (RPPR). Therefore, even if authors failed to disclose funding in the article but submitted this information to other platforms, this information becomes available in PubMed/RePORTER. For this reason, we believe that funding data provided by PubMed is more comprehensive than what is reported in the article. Additionally, we observed minor issues regarding duplicate entries, where the same grant appeared several times with varying formats—e.g., 'NCI NIH HHS (R01 CA138409)' and 'NCI NIH HHS (CA138409)', or 'P20RR 15635' and 'P20 RR015635'. To prevent double-counting, we implemented an automated cleaning of duplicates based on numeric suffix matching.
 
 After examining this sample, we wanted to determine if PubMed might have poorer retrieval of NIH grants for older cases (although it is also important to note that the number of retractions is much higher in recent publications). Nonetheless, for this reason, but also to further examine the possible issues mentioned above, we randomly selected another 200 entries from the entire sample, ensuring that 100 entries corresponded to articles published before 2005 and the other 100 corresponded to articles published after 2005. After removing the records that lacked an associated PubMed ID, we were finally able to examine 73 and 65 entries from each publication period.
 
-In all cases within this new sample (both before and after 2005), whenever PubMed did not retrieve a grant ID it was because, correctly, no grant ID had been reported in the article either. For the subset of articles published before 2005, PubMed identified at least one NIH grant in 37 entries. Upon inspecting these grants, out of a total of 77 NIH grants IDs that were retrieved by PubMed/74 NIH grants IDs that were explicitly reported in the articles, a total of 6 grants could not be found in RePORTER. Two of these cases not found in RePORTER were published before 1985, which could explain this omission, as RePORTER data only goes back to 1985. In the remaining entries with funding, discrepancies between the number of NIH grant IDs retrieved by PubMed and those reported in the articles were found in only two cases; one because a grant ID was duplicated and in the other cases 2 grant IDs not reported in the text were present in PubMed. After inspecting these cases, we believe it may be a PubMed error since the Fiscal Year was later than the publication of the article. To control these types of potential errors, we will exclude grant IDs with fiscal years that post-date the article's publication.
+In all cases within this new sample (both before and after 2005), whenever PubMed did not retrieve a grant ID it was because, correctly, no grant ID had been reported in the article either. For the subset of articles published before 2005, PubMed identified at least one NIH grant in 37 entries. Upon inspecting these grants, out of a total of 77 NIH grants IDs that were retrieved by PubMed/74 NIH grants IDs that were explicitly reported in the articles, a total of 6 grants could not be found in RePORTER. Two of these cases not found in RePORTER were published before 1985, which could explain this omission, as RePORTER data only goes back to 1985. In the remaining entries with funding, discrepancies between the number of NIH grant IDs retrieved by PubMed and those reported in the articles were found in only two cases; one because a grant ID was duplicated and in the other cases 2 grant IDs not reported in the text were present in PubMed. After inspecting these cases, we believe it may be a PubMed error since the Fiscal Year was later than the publication of the article. To control these types of potential errors, we excluded grant IDs with fiscal years that post-date the article's publication.
 
 For the subset of articles published after 2005, PubMed retrieved some NIH funding for 21 entries. For these entries, PubMed retrieved a total of 90 NIH grant IDs, while only 43 were reported in the articles. 24 of these discrepancies were due to duplicate grant IDs, an issue easily resolved by deduplicating as previously mentioned. Most of the remaining 23 discrepancies stem from a case where the article only reports 'This work was supported by National Institutes of Health grants' yet PubMed retrieves 14 NIH grant IDs, all of which are linked to one of the authors; we therefore consider this a case where PubMed was more comprehensive than the article itself. Of the remaining 9 discrepant NIH grant IDs, 7 of the grant IDs were also linked to one of the authors, and the other appears to be a PubMed error assigning two placeholder grant IDs (NIA NIH HHS (R99 AG999999); Intramural NIH HHS (Z99 AG999999)), not found in RePORTER. In sum, most discrepancies are due to duplicates that can be resolved or NIH grant IDs that were not reported in the article but are linked to the authors. Spreadsheets with the selected and inspected samples can be found in the ‘Supplementary Materials’ folder of the OSF registration as ‘sample_1.xlsx’ and ‘sample_2.xlsx’ at (<https://osf.io/guq59/>).
 
@@ -467,6 +473,9 @@ Unlike the other categories, "Formal misconduct investigation" does not describe
 ## Scientific domains and publishers of U.S. retracted articles
 
 ```{r fig.cap="Scientific Domains. Note: A single paper can have multiple subjects, but each broad category is counted at most once per paper.", fig.height=4.5, fig.width=9, dpi=300}
+# Scientific-domain figure. The ";"-separated Subject field carries parenthesised domain
+# acronyms (e.g. "(HSC)"); we split it, map each acronym to its full domain name, keep each
+# (paper, domain) once, and draw a horizontal stacked bar of paper counts by funding status.
 domains_data <- df_papers %>%
   drop_na(Subject) %>%
   mutate(Paper_ID = row_number()) %>%
@@ -514,6 +523,10 @@ print(p_domains)
 ```
 
 ```{r fig.cap="Top Retracted Publishers. Note: Publishers were grouped by parent companies where possible. 'Springer Nature' includes Springer, Nature, BMC, Palgrave. 'Elsevier' includes Cell Press, Lancet. 'Hindawi' has been separated from 'Wiley' to show its specific impact. 'Taylor & Francis' includes Routledge, Dove Medical Press..", fig.height=9.5, fig.width=12, dpi=300}
+# Top-publishers figure. Raw publisher names are consolidated into parent companies with a
+# case_when() of case-insensitive patterns (e.g. Springer/Nature/BMC -> "Springer Nature";
+# Hindawi is kept separate from Wiley to show it specifically), then the 20 most frequent
+# groups are drawn as a horizontal stacked bar of paper counts by funding status.
 publishers_data <- df_papers %>%
   drop_na(Publisher) %>%
   mutate(Publisher = str_trim(Publisher)) %>%

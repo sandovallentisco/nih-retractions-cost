@@ -10,7 +10,7 @@
 # Practical impact
 # ----------------
 # * Cold cache (first run, or after a manual cache wipe): ~1.5 hours.
-# * Warm cache (every quarterly cron after the first): a few minutes -
+# * Warm cache (every weekly cron after the first): a few minutes -
 #   exactly proportional to the number of new retractions added by
 #   Retraction Watch since the previous run.
 # =============================================================================

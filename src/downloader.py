@@ -10,7 +10,7 @@
 #
 # This module is the entrypoint that allows the entire pipeline to run in a
 # fully unattended environment such as the GitHub Actions cron defined in
-# ``.github/workflows/quarterly_update.yml``.
+# ``.github/workflows/weekly_update.yml``.
 #
 # Usage::
 #
@@ -242,7 +242,7 @@ def download_recent_nih_years(n_back: int = 2,
                               force_current: bool = True) -> List[Path]:
     """Download the current fiscal year plus ``n_back`` previous years.
 
-    Designed for the recurring quarterly cron: only the moving window of
+    Designed for the recurring weekly cron: only the moving window of
     recent years is refreshed because older NIH data does not change.
     """
     fy_now = _current_fiscal_year()
