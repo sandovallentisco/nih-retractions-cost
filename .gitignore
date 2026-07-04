@@ -45,6 +45,14 @@ __pycache__/
 .Rhistory
 
 # =============================================================================
+# Deployment (shinyapps.io)
+# =============================================================================
+# rsconnect deployment records: local, machine/account-specific metadata whose
+# bundleId churns on every deploy. Not read by deploy_shiny.R or the CI (both
+# deploy with an explicit appName), so there is no reason to track it.
+rsconnect/
+
+# =============================================================================
 # OS
 # =============================================================================
 .DS_Store

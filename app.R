@@ -213,6 +213,22 @@ dashboard_theme <- theme_classic(base_size = 12) +
 corporate_colors <- c("NIH Funded" = "#005b96",
                       "Not NIH Funded / Other" = "gray70")
 
+# Finalize a paper-level card plot (Article Characteristics tab). On shinyapps.io plotly can
+# mis-size a ggplotly rendered inside an initially-hidden / narrow tab, leaving the panel shifted
+# to the right. Forcing a full x-domain, an explicit/auto left margin, a left-anchored top legend
+# (no negative-x reservation) and responsive sizing -- together with the tab-shown resize hook in
+# the header -- keeps every plot filling its card. `left` is the base left margin; automargin
+# expands it for the horizontal bar charts whose category labels need more room.
+finalize_card_plot <- function(gg, left = 55) {
+  ggplotly(gg, tooltip = c("x", "y", "fill")) %>%
+    layout(legend = list(orientation = "h", x = 0, xanchor = "left", y = 1.12, title = list(text = "")),
+           margin = list(l = left, r = 25, t = 55, b = 45),
+           xaxis = list(domain = c(0, 1), automargin = TRUE),
+           yaxis = list(automargin = TRUE),
+           autosize = TRUE) %>%
+    config(responsive = TRUE)
+}
+
 # --- Figure-1-style within-author difference boxplots (shared logic with policy_analysis.qmd) -
 # For each author and year offset, the change in value (funding $ or active-grant count) vs.
 # that author's value at year -3 (a within-author subtraction, defined for the full cohort;
@@ -374,12 +390,23 @@ ui <- navbarPage(
       });
     ", last_updated_str))),
     # Plotly plots on non-active tabs are laid out inside a hidden container and can render at the
-    # wrong width on shinyapps.io (they appear shifted to the right). Trigger a window resize when a
-    # tab becomes visible so every plot reflows to fill its card. No effect locally (already correct).
+    # wrong width on shinyapps.io (they appear shifted to the right). Force every plotly plot to
+    # recompute its size when its tab is shown (and shortly after load), directly via
+    # Plotly.Plots.resize plus a window resize event. No effect locally (already correct).
     tags$script(HTML("
+      function ccResizePlots() {
+        if (window.Plotly && window.Plotly.Plots) {
+          document.querySelectorAll('.js-plotly-plot').forEach(function(gd) {
+            try { window.Plotly.Plots.resize(gd); } catch (e) {}
+          });
+        }
+        window.dispatchEvent(new Event('resize'));
+      }
       $(document).on('shown.bs.tab', function() {
-        setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 50);
+        setTimeout(ccResizePlots, 50);
+        setTimeout(ccResizePlots, 350);
       });
+      $(window).on('load', function() { setTimeout(ccResizePlots, 350); });
     "))
   ),
   
@@ -559,8 +586,7 @@ server <- function(input, output, session) {
       scale_fill_manual(values = corporate_colors) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Publication Year", y = "No. of articles") + dashboard_theme
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
-      config(responsive = TRUE)
+    finalize_card_plot(p)
   })
   
   output$plot_ret_year <- renderPlotly({
@@ -572,8 +598,7 @@ server <- function(input, output, session) {
       scale_fill_manual(values = corporate_colors) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Retraction Year", y = "No. of articles") + dashboard_theme
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
-      config(responsive = TRUE)
+    finalize_card_plot(p)
   })
   
   # --- Retraction-lag histogram + summary ---
@@ -721,9 +746,12 @@ server <- function(input, output, session) {
              pct = n_art / ifelse(`Funding Status` == "NIH Funded", n_nih, n_oth) * 100) %>%
       group_by(`Domain Full`) %>%
       mutate(n_oth_cat = sum(n_art[`Funding Status` == "Not NIH Funded / Other"]),
+             cat_total = sum(n_art),
              ypos = ifelse(`Funding Status` == "NIH Funded", n_oth_cat + n_art / 2, n_art / 2)) %>%
       ungroup() %>%
-      mutate(seg_label = ifelse(n_art >= 30, sprintf("%.1f%%", pct), ""))   # hide on very thin segments
+      # Hide the % label when its segment is too narrow to fit "XX.X%" (it would overflow the bar):
+      # threshold at 13% of the widest stacked bar, calibrated so labels never spill past a segment.
+      mutate(seg_label = ifelse(n_art >= 0.13 * max(cat_total), sprintf("%.1f%%", pct), ""))
     seg_nih <- seg %>% filter(`Funding Status` == "NIH Funded",             seg_label != "")
     seg_oth <- seg %>% filter(`Funding Status` == "Not NIH Funded / Other", seg_label != "")
 
@@ -739,8 +767,7 @@ server <- function(input, output, session) {
       scale_fill_manual(values = corporate_colors) + scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + labs(x = "", y = "No. of articles") + dashboard_theme +
       theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5))
 
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
-      config(responsive = TRUE)
+    finalize_card_plot(p, left = 10)
   })
   
   output$plot_reasons <- renderPlotly({
@@ -769,9 +796,12 @@ server <- function(input, output, session) {
              Category = factor(wrap_cat(Category), levels = rev(wrap_cat(cat_order)))) %>%
       group_by(Category) %>%
       mutate(n_oth_cat = sum(n_art[`Funding Status` == "Not NIH Funded / Other"]),
+             cat_total = sum(n_art),
              ypos = ifelse(`Funding Status` == "NIH Funded", n_oth_cat + n_art / 2, n_art / 2)) %>%
       ungroup() %>%
-      mutate(seg_label = ifelse(n_art >= 30, sprintf("%.1f%%", pct), ""))   # hide on very thin segments
+      # Hide the % label when its segment is too narrow to fit "XX.X%" (it would overflow the bar):
+      # threshold at 13% of the widest stacked bar, calibrated so labels never spill past a segment.
+      mutate(seg_label = ifelse(n_art >= 0.13 * max(cat_total), sprintf("%.1f%%", pct), ""))
     seg_nih <- seg %>% filter(`Funding Status` == "NIH Funded",             seg_label != "")
     seg_oth <- seg %>% filter(`Funding Status` == "Not NIH Funded / Other", seg_label != "")
 
@@ -788,9 +818,7 @@ server <- function(input, output, session) {
       scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + labs(x = "", y = "No. of articles") + dashboard_theme +
       theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5))
 
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>%
-      layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
-      config(responsive = TRUE)
+    finalize_card_plot(p, left = 10)
   })
 
   # --- Filtered Authors Reactive ---
