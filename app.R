@@ -137,6 +137,68 @@ latest_fiscal_year     <- max(df_authors$Fiscal_Year, na.rm = TRUE)
 retraction_cutoff_year <- latest_fiscal_year - 3
 df_authors <- df_authors %>% filter(First_Retraction_Year <= retraction_cutoff_year)
 
+# --- GRANT-LEVEL DIRECT COST (Summary tab) ---
+# Mirrors the "Direct cost to the NIH" section of policy_analysis.qmd. Two measures beyond the
+# per-paper attributed cost:
+#   (2) total_cost_unique_grants -> full nominal award of every DISTINCT NIH grant behind a
+#       retracted paper, counted once (a grant can yield several retracted papers, so summing
+#       across paper rows would double-count shared grants).
+#   (4) total_cost_personal_pi   -> of those distinct grants, only investigator-held
+#       research/career/fellowship awards (codes R/K/F + DP1/2/5) for which a retracted author is
+#       the PI. Excludes institutional center/infrastructure funding (P30, U01, P01, training...).
+cpi_year <- max(annual_cpi$Fiscal_Year, na.rm = TRUE)
+
+# (2) Distinct-grant nominal cost, no double counting. Funding_Info_cleaned (grant IDs) and
+# Individual_NIH_Grant_Costs (matching awards) are ";"-separated, aligned position-for-position.
+grant_costs <- df_papers %>%
+  filter(Funding_Status == "NIH Funded") %>%
+  transmute(mult = Inflation_Multiplier,
+            pair = map2(str_split(Funding_Info_cleaned, ";"),
+                        str_split(Individual_NIH_Grant_Costs, ";"),
+                        ~ tibble(grant = str_trim(.x), gcost = as.numeric(str_trim(.y))))) %>%
+  unnest(pair) %>%
+  filter(!is.na(grant), grant != "", !is.na(gcost)) %>%
+  # Collapse to one row per DISTINCT grant: gcost = first() (a grant carries the same award in
+  # every paper citing it); mult = mean() of the citing papers' CPI multipliers (a grant has no
+  # single base year to deflate from).
+  group_by(grant) %>% summarise(gcost = first(gcost), mult = mean(mult, na.rm = TRUE), .groups = "drop")
+mult_fallback <- mean(grant_costs$mult[is.finite(grant_costs$mult)])
+grant_costs   <- grant_costs %>% mutate(mult = ifelse(is.finite(mult), mult, mult_fallback))
+n_unique_grants          <- nrow(grant_costs)
+total_cost_unique_grants <- sum(grant_costs$gcost)
+
+# (3) Recover each grant's NIH activity code (R01, P30, ...) to flag "personal" investigator awards.
+# The code is not in Funding_Info_cleaned but is in the raw Funding_Info text (e.g. "(R01 CA203737)")
+# and in the authors file's full Grant_ID (e.g. "K08HL086671"). Prefer Funding_Info, else authors.
+code_pat <- "([A-Z][A-Z0-9]{2})\\s*([A-Z]{2})([0-9]{4,})"
+fi_map <- df_papers %>% filter(Funding_Status == "NIH Funded") %>%
+  transmute(m = str_match_all(Funding_Info, code_pat)) %>%
+  mutate(p = map(m, ~ tibble(grant = paste0(.x[, 3], .x[, 4]), act = .x[, 2]))) %>%
+  select(p) %>% unnest(p) %>%
+  distinct(grant, act) %>% group_by(grant) %>% summarise(act_fi = first(act), .groups = "drop")
+au_map <- df_authors_raw %>%
+  transmute(m = str_match(Grant_ID, code_pat)) %>%
+  transmute(grant = paste0(m[, 3], m[, 4]), act = m[, 2]) %>%
+  filter(!is.na(act)) %>% distinct(grant, act) %>%
+  group_by(grant) %>% summarise(act_au = first(act), .groups = "drop")
+grants_typed <- grant_costs %>%
+  left_join(fi_map, by = "grant") %>% left_join(au_map, by = "grant") %>%
+  mutate(activity = toupper(coalesce(act_fi, act_au)),
+         personal = coalesce((str_detect(activity, "^[RKF]") &
+                              !activity %in% c("K12", "KL2", "R24", "R25", "R41", "R42", "R43", "R44", "RL1")) |
+                             activity %in% c("DP1", "DP2", "DP5"), FALSE))
+
+# (4) Keep only the personal grants for which a retracted author is the PI (grant "core" = IC +
+# serial appears in the author-funding matches, i.e. the retracted author holds it, not merely
+# acknowledged). These are investigator-held, PI-attributed dollars.
+pi_cores <- df_authors_raw %>%
+  transmute(core = str_extract(Grant_ID, "[A-Z]{2}[0-9]{4,}$")) %>%
+  filter(!is.na(core)) %>% distinct(core) %>% pull(core)
+personal_pi <- grants_typed$personal & grants_typed$grant %in% pi_cores
+total_cost_personal_pi     <- sum(grants_typed$gcost[personal_pi])                        # nominal $
+total_cost_personal_pi_adj <- sum((grants_typed$gcost * grants_typed$mult)[personal_pi])  # CPI-adjusted $
+n_grants_personal_pi       <- sum(personal_pi)
+
 # --- GLOBAL PLOT THEME ---
 # Transparent backgrounds so plots blend with the dashboard cards.
 dashboard_theme <- theme_classic(base_size = 12) +
@@ -280,6 +342,19 @@ nih_css <- "
     margin-bottom: 20px;
     font-size: 18px;
   }
+
+  /* Page footer (shown below the tab content on every tab) */
+  .dashboard-footer {
+    margin-top: 30px;
+    padding: 22px 15px 26px 15px;
+    text-align: center;
+    color: #777;
+    font-size: 13px;
+    line-height: 1.7;
+    border-top: 1px solid #dcdcdc;
+  }
+  .dashboard-footer a { color: #17a2b8; text-decoration: none; font-weight: bold; }
+  .dashboard-footer a:hover { text-decoration: underline; }
 "
 
 # 3. USER INTERFACE (UI)
@@ -297,7 +372,15 @@ ui <- navbarPage(
       $(document).ready(function() {
         $('<p class=\"navbar-text navbar-right\" style=\"margin-right: 15px; color: #dddddd;\">Last updated: %s</p>').appendTo('.navbar > .container-fluid');
       });
-    ", last_updated_str)))
+    ", last_updated_str))),
+    # Plotly plots on non-active tabs are laid out inside a hidden container and can render at the
+    # wrong width on shinyapps.io (they appear shifted to the right). Trigger a window resize when a
+    # tab becomes visible so every plot reflows to fill its card. No effect locally (already correct).
+    tags$script(HTML("
+      $(document).on('shown.bs.tab', function() {
+        setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 50);
+      });
+    "))
   ),
   
   # --- TAB 1: Summary ---
@@ -328,7 +411,22 @@ ui <- navbarPage(
                           h4("Retraction Costs Summary (Raw and FRED CPI Adjusted)"),
                           withSpinner(DTOutput("cost_summary_table"), type = 4, color = "#17a2b8"),
                           p(em("Note: Adjusted Attributed Cost reflects values adjusted for inflation to current dollars using the Consumer Price Index for All Urban Consumers (CPI-AUCSL) provided by the Federal Reserve Economic Data (FRED)."),
-                            style = "color: gray; font-size: 12px; margin-top: 10px;")
+                            style = "color: gray; font-size: 12px; margin-top: 10px;"),
+                          # Grant-level funding behind retracted papers (distinct grants + investigator-held
+                          # R/K/F PI awards), mirroring the "Direct cost to the NIH" section of the manuscript.
+                          # Values are computed once at startup in the grant-level cost block above.
+                          div(style = "background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef; margin-top: 20px;",
+                              div(style = "font-size: 14px; color: #555; line-height: 1.5;",
+                                  HTML(paste0(
+                                    "The retracted publications were associated with a total of ", comma(n_unique_grants),
+                                    " distinct NIH grants, i.e., a total of ", dollar_short(total_cost_unique_grants),
+                                    " in nominal dollars. However, the vast majority of this sum is institutional center and infrastructure funding (e.g., P30 center core grants) rather than money awarded to individual investigators. Considering only investigator-held research, career and fellowship awards (R/K/F-series) for which the retracted author was the principal investigator, a total amount of ",
+                                    dollar_short(total_cost_personal_pi), " in nominal dollars (", dollar_short(total_cost_personal_pi_adj),
+                                    " in ", cpi_year, " dollars) from ", comma(n_grants_personal_pi),
+                                    " grants was associated with retracted papers."
+                                  ))
+                              )
+                          )
                       )
                )
              )
@@ -357,7 +455,7 @@ ui <- navbarPage(
                column(6, div(class = "nih-card",
                              h4("Scientific Domains"),
                              withSpinner(plotlyOutput("plot_domains"), type = 4, color = "#17a2b8"),
-                             p(em("Note: A single paper can have multiple subjects, but each broad category is counted at most once per paper."),
+                             p(em("Note: The percentages are the share of papers in each funding group (NIH-funded, in blue; non-NIH-funded, in gray) classified in that scientific domain. A single paper can have multiple subjects, but each broad category is counted at most once per paper. Because a paper can span several domains, the categories are not mutually exclusive and the percentages do not sum to 100%."),
                                style = "color: gray; font-size: 12px; margin-top: 10px;")))
              ),
              fluidRow(
@@ -400,6 +498,14 @@ ui <- navbarPage(
                              withSpinner(uiOutput("stats_active_grants"), type = 4, color = "#17a2b8")))
              )
            )
+  ),
+  footer = tags$footer(
+    class = "dashboard-footer",
+    HTML(paste0(
+      "2026 &middot; <a href='https://sandovallentisco.github.io/' target='_blank' rel='noopener'>Alejandro Sandoval-Lentisco</a><br>",
+      "Details about the methodology can be found in <em>Sandoval-Lentisco, A., Ioannidis, J.P.A. (2026). Cost of Retracted Articles to the NIH: a Living Analysis. medRxiv</em>.<br>",
+      "Data and analysis code can be found at <a href='https://github.com/sandovallentisco/nih-retractions-cost' target='_blank' rel='noopener'>github.com/sandovallentisco/nih-retractions-cost</a>."
+    ))
   )
 )
 
@@ -453,7 +559,8 @@ server <- function(input, output, session) {
       scale_fill_manual(values = corporate_colors) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Publication Year", y = "No. of articles") + dashboard_theme
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
+    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
+      config(responsive = TRUE)
   })
   
   output$plot_ret_year <- renderPlotly({
@@ -465,7 +572,8 @@ server <- function(input, output, session) {
       scale_fill_manual(values = corporate_colors) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
       labs(x = "Retraction Year", y = "No. of articles") + dashboard_theme
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50))
+    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = 0, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
+      config(responsive = TRUE)
   })
   
   # --- Retraction-lag histogram + summary ---
@@ -597,16 +705,42 @@ server <- function(input, output, session) {
       distinct(Paper_ID, Domain_Full, Funding_Status)
     
     domain_order <- domains_data %>% count(Domain_Full, sort = TRUE) %>% pull(Domain_Full)
-    
-    p <- domains_data %>%
+
+    # Within-group denominators (all papers in each funding group), exactly as in Table 1 and the
+    # Top Reasons panel: each % is the share of papers in that funding group classified in the domain.
+    n_nih <- sum(df_papers$Funding_Status == "NIH Funded")
+    n_oth <- sum(df_papers$Funding_Status == "Not NIH Funded / Other")
+
+    # Non-NIH is the left part of each bar, NIH the right; place each % label at its segment centre
+    # (computed explicitly so the label lands on the correct segment, not via position_stack).
+    seg <- domains_data %>%
       mutate(Domain_Full = factor(Domain_Full, levels = rev(domain_order))) %>%
       rename(`Domain Full` = Domain_Full, `Funding Status` = Funding_Status) %>%
-      count(`Domain Full`, `Funding Status`, name = "No. of articles") %>%
-      ggplot(aes(x = `Domain Full`, y = `No. of articles`, fill = `Funding Status`)) + geom_col(color = "white", position = "stack") + coord_flip() +
+      count(`Domain Full`, `Funding Status`, name = "n_art") %>%
+      mutate(`Funding Status` = factor(`Funding Status`, levels = c("NIH Funded", "Not NIH Funded / Other")),
+             pct = n_art / ifelse(`Funding Status` == "NIH Funded", n_nih, n_oth) * 100) %>%
+      group_by(`Domain Full`) %>%
+      mutate(n_oth_cat = sum(n_art[`Funding Status` == "Not NIH Funded / Other"]),
+             ypos = ifelse(`Funding Status` == "NIH Funded", n_oth_cat + n_art / 2, n_art / 2)) %>%
+      ungroup() %>%
+      mutate(seg_label = ifelse(n_art >= 30, sprintf("%.1f%%", pct), ""))   # hide on very thin segments
+    seg_nih <- seg %>% filter(`Funding Status` == "NIH Funded",             seg_label != "")
+    seg_oth <- seg %>% filter(`Funding Status` == "Not NIH Funded / Other", seg_label != "")
+
+    # Two fixed-colour text layers (inherit.aes = FALSE) so ggplotly keeps a clean two-entry legend;
+    # labels sit at the explicit segment centres (ypos).
+    p <- ggplot(seg, aes(x = `Domain Full`, y = n_art, fill = `Funding Status`)) +
+      geom_col(color = "white", position = "stack") +
+      geom_text(data = seg_oth, aes(x = `Domain Full`, y = ypos, label = seg_label), inherit.aes = FALSE,
+                color = "gray20", fontface = "bold", size = 3.2) +
+      geom_text(data = seg_nih, aes(x = `Domain Full`, y = ypos, label = seg_label), inherit.aes = FALSE,
+                color = "white", fontface = "bold", size = 3.2) +
+      coord_flip() +
       scale_fill_manual(values = corporate_colors) + scale_y_continuous(expand = expansion(mult = c(0, 0.05))) + labs(x = "", y = "No. of articles") + dashboard_theme +
       theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5))
-    
-    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
+
+    ggplotly(p, tooltip = c("x", "y", "fill")) %>% layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
+      config(responsive = TRUE)
   })
   
   output$plot_reasons <- renderPlotly({
@@ -655,9 +789,10 @@ server <- function(input, output, session) {
       theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "gray90", linewidth = 0.5))
 
     ggplotly(p, tooltip = c("x", "y", "fill")) %>%
-      layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50))
+      layout(legend = list(orientation = "h", x = -0.5, y = 1.15, title = list(text = "")), margin = list(t = 50)) %>%
+      config(responsive = TRUE)
   })
-  
+
   # --- Filtered Authors Reactive ---
   filtered_authors <- reactive({
     req(input$author_cohort_filter)
@@ -743,7 +878,7 @@ server <- function(input, output, session) {
   output$plot_avg_funding_note <- renderUI({
     fa <- filtered_authors()
     total_authors <- n_distinct(fa$Original_Author_Name)
-    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: For the cohort (", comma(total_authors), " authors), each box shows the distribution of the within-author change in annual NIH funding relative to the baseline year -3 (so year -3 is identically $0). Green boxes are the pre-retraction years (-3 to 0) and orange the post-retraction years (1 to 3); the box is the interquartile range, the centre line the median, the whiskers the 10th-90th percentiles, and the black line traces the mean change (the y-axis is fit to the whiskers). The per-author pre-vs-post medians and Wilcoxon signed-rank test reported in the statistics panel average each author's funding within the 3-year window and then take the median across the full cohort (authors with no funding contribute $0). To find the funding granted to retracted authors in the NIH RePORTER system, we used strict name matching (requiring an exact match of first, middle, and last names). This approach minimizes the possibility of false positives, but if an author was not found due to a name variation, they are treated as having $0 funding, making this a conservative estimate of the financial impact. For authors whose name nonetheless matches more than one NIH investigator, we keep only the grants of the investigator whose awardee institution matches their retracted paper (identified by NIH PI identifier), removing funding that belongs to same-named researchers, consistent with the manuscript.</p>"))
+    HTML(paste0("<p style='color: gray; font-size: 12px; margin-top: 10px; font-style: italic;'>Note: For the cohort (", comma(total_authors), " authors), each box shows the distribution of the within-author change in annual NIH funding relative to the baseline year -3 (so year -3 is identically $0). Green boxes are the pre-retraction years (-3 to 0) and orange the post-retraction years (1 to 3); the box is the interquartile range, the centre line the median, the whiskers the 10th-90th percentiles, and the black line traces the mean change (the y-axis is fit to the whiskers). The per-author pre-vs-post medians and Wilcoxon signed-rank test reported in the statistics panel average each author's funding within the 3-year window and then take the median across the full cohort (authors with no funding contribute $0).</p>"))
   })
   
   # --- Statistical tests ---
@@ -791,11 +926,16 @@ server <- function(input, output, session) {
     pct_color <- ifelse(is.na(pct_change) || pct_change >= 0, "#5cb85c", "#d9534f")
 
     total_authors <- n_distinct(filtered_authors()$Original_Author_Name)
-    active_authors_pre  <- sum(pd$Annual_Funding_Pre  > 0, na.rm = TRUE)
-    active_authors_post <- sum(pd$Annual_Funding_Post > 0, na.rm = TRUE)
-    lost_all_n <- sum(pd$Annual_Funding_Pre > 0 & pd$Annual_Funding_Post == 0, na.rm = TRUE)
-    gained_n   <- sum(pd$Annual_Funding_Pre == 0 & pd$Annual_Funding_Post > 0, na.rm = TRUE)
-    lost_all_pct <- (lost_all_n / total_authors) * 100
+    active_authors_pre  <- sum(pd_full$Annual_Funding_Pre  > 0, na.rm = TRUE)
+    active_authors_post <- sum(pd_full$Annual_Funding_Post > 0, na.rm = TRUE)
+    # lost_all_pct is the share of PREVIOUSLY FUNDED authors (Pre > 0) who hold no NIH funding in
+    # the 3 post-retraction years (denominator = n_funded_pre), exactly as in policy_analysis.qmd.
+    # gained_pct stays over the whole cohort (also as in policy_analysis.qmd), hence the two boxes
+    # below use different denominators (made explicit in their captions).
+    n_funded_pre <- sum(pd_full$Annual_Funding_Pre > 0, na.rm = TRUE)
+    lost_all_n <- sum(pd_full$Annual_Funding_Pre > 0 & pd_full$Annual_Funding_Post == 0, na.rm = TRUE)
+    gained_n   <- sum(pd_full$Annual_Funding_Pre == 0 & pd_full$Annual_Funding_Post > 0, na.rm = TRUE)
+    lost_all_pct <- (lost_all_n / n_funded_pre) * 100
     gained_pct   <- (gained_n   / total_authors) * 100
 
     pct_change_txt <- if (is.na(pct_change)) "n/a (median pre = $0)" else sprintf("%+.1f%%", pct_change)
@@ -829,17 +969,17 @@ server <- function(input, output, session) {
       "<div style='width: 48%; background-color: #fdf2f2; padding: 10px; border-radius: 6px; border: 1px solid #fadcdc; text-align: center;'>",
       "<div style='color: #d9534f; font-weight: bold; margin-bottom: 5px;'>LOST ALL FUNDING</div>",
       "<div style='color: #777; margin-bottom: 5px;'>(Had Pre, $0 Post)</div>",
-      "<div style='font-size: 18px; font-weight: bold; color: #333;'>", sprintf("%.1f%%", lost_all_pct), " <span style='font-size: 11px; font-weight: normal; color: #777;'>(", comma(lost_all_n), " authors)</span></div>",
+      "<div style='font-size: 18px; font-weight: bold; color: #333;'>", sprintf("%.1f%%", lost_all_pct), " <span style='font-size: 11px; font-weight: normal; color: #777;'>(", comma(lost_all_n), " of ", comma(n_funded_pre), " prev. funded)</span></div>",
       "</div>",
       "<div style='width: 48%; background-color: #f4fdf5; padding: 10px; border-radius: 6px; border: 1px solid #d4edda; text-align: center;'>",
       "<div style='color: #5cb85c; font-weight: bold; margin-bottom: 5px;'>GAINED FUNDING</div>",
       "<div style='color: #777; margin-bottom: 5px;'>($0 Pre, Had Post)</div>",
-      "<div style='font-size: 18px; font-weight: bold; color: #333;'>", sprintf("%.1f%%", gained_pct), " <span style='font-size: 11px; font-weight: normal; color: #777;'>(", comma(gained_n), " authors)</span></div>",
+      "<div style='font-size: 18px; font-weight: bold; color: #333;'>", sprintf("%.1f%%", gained_pct), " <span style='font-size: 11px; font-weight: normal; color: #777;'>(", comma(gained_n), " of ", comma(total_authors), " in cohort)</span></div>",
       "</div>",
       "</div>",
       
       "<div style='background-color: #f8f9fa; padding: 15px; border-radius: 6px; border: 1px solid #e9ecef;'>",
-      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction. Considering the ", comma(total_authors), " authors, this cohort received ", dollar_short(total_funding_pre), " of NIH funding per year in the 3 pre-retraction years and ", dollar_short(total_funding_post), " per year in the 3 post-retraction years, amounting to ", dollar_short(total_funding_pre * 3), " and ", dollar_short(total_funding_post * 3), " across the 3 pre and post-retraction years.</div>",
+      "<div style='font-size: 13px; color: #555; line-height: 1.4;'>We found that ", comma(active_authors_pre), " authors received at least some funding in the 3 years pre-retraction and ", comma(active_authors_post), " authors received at least some funding in the 3 years post-retraction.</div>",
       "</div>",
       "</div>"
     ))
